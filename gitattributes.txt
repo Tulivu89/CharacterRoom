@@ -1,0 +1,1 @@
+*.naiscript linguist-language=JavaScript
