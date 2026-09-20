@@ -1,0 +1,199 @@
+/*---
+compatibilityVersion: naiscript-1.0
+id: 132636be-5573-479a-9351-4d4472e072a1
+name: CR Persona Helper 1
+createdAt: 1791402300000
+updatedAt: 1791920700000
+version: 0.2.0
+author: AmbiProp
+description: |-
+  Lends its generation allowance to CharacterRoom group chat. Install alongside CharacterRoom, not instead of it.
+  TO ADD MORE
+  1. Export this script.
+  2. Change two things in the header. name, so it ends in the next number. id, so it is unique.
+  3. Import it back.
+  There is nothing to edit in the code. The number is read from the name.
+  This script has no interface. CharacterRoom shows every helper on Chat then Group.
+memoryLimit: 8
+---*/
+// Group-chat helper for CharacterRoom. Messages on "cr-persona-helper": PH_HELLO PH_PING PH_WAKE
+// PH_PONG PH_RUN PH_DONE. Change this script and CharacterRoom together or not at all.
+
+var PH_VERSION = '0.0.4';
+var PH_CHANNEL = 'cr-persona-helper';
+
+function phNumber(): number {
+    try {
+        var pnM = String(api.v1.script.name || '').match(/(\d+)\s*$/);
+        var pnN = pnM ? parseInt(pnM[1], 10) : 1;
+        return (pnN > 0) ? pnN : 1;
+    } catch (ePn) { return 1; }
+}
+var PH_NO = phNumber();
+var PH_LABEL = 'Helper ' + String(PH_NO);
+
+var _phBusy = false;
+var _phGens = 0;
+var _phLastErr = '';
+var _phLatched = false;
+
+function phOut(): number {
+    try { return api.v1.script.getAllowedOutput ? api.v1.script.getAllowedOutput() : -1; }
+    catch (eO) { return -1; }
+}
+function phIn(): number {
+    try { return api.v1.script.getAllowedInput ? api.v1.script.getAllowedInput() : -1; }
+    catch (eI) { return -1; }
+}
+
+var _phPredErr = '';
+async function phUncached(msgs: any[], model: string): Promise<number> {
+    _phPredErr = '';
+    try {
+        if (!api.v1.script.countUncachedInputTokens) { _phPredErr = 'method missing'; return -1; }
+        // The runtime requires the model argument; the typings omit it.
+        var puR: any = (api.v1.script.countUncachedInputTokens as any)(msgs, model || 'xialong-v1');
+        var puN: any = (puR && typeof puR.then === 'function') ? await puR : puR;
+        if (typeof puN === 'number' && puN >= 0) return puN;
+        _phPredErr = 'returned ' + (typeof puN) + ' ' + String(puN).slice(0, 40);
+        return -1;
+    } catch (ePu) {
+        _phPredErr = 'threw ' + String((ePu && (ePu as any).message) || ePu).slice(0, 120);
+        return -1;
+    }
+}
+
+function phState(): any {
+    return {
+        no: PH_NO, label: PH_LABEL, version: PH_VERSION,
+        out: _phLatched ? 0 : phOut(),
+        inp: phIn(),
+        busy: _phBusy, gens: _phGens, lastErr: _phLastErr
+    };
+}
+
+function phSend(toSid: string, data: any): string {
+    try {
+        var psR: any = api.v1.messaging.send(toSid, data, PH_CHANNEL);
+        if (psR && typeof psR.then === 'function') psR.catch(function() {});
+        return '';
+    } catch (ePs) {
+        return String((ePs && (ePs as any).message) || ePs || 'send failed');
+    }
+}
+
+async function phAnnounce(): Promise<void> {
+    try {
+        var paMsg: any = phState();
+        paMsg.type = 'PH_HELLO';
+        paMsg.sid = api.v1.script.id;
+        await api.v1.messaging.broadcast(paMsg, PH_CHANNEL);
+    } catch (ePa) { api.v1.error('[' + PH_LABEL + '] announce failed:', ePa); }
+}
+
+function phIsWall(msg: string): boolean {
+    var pwM = String(msg || '').toLowerCase();
+    if (!pwM) return false;
+    if (pwM.indexOf('abort') >= 0 || pwM.indexOf('cancel') >= 0) return false;
+    if (pwM.indexOf('network') >= 0 || pwM.indexOf('timeout') >= 0 || pwM.indexOf('timed out') >= 0) return false;
+    return pwM.indexOf('budget') >= 0 || pwM.indexOf('quota') >= 0 || pwM.indexOf('allowance') >= 0
+        || pwM.indexOf('insufficient') >= 0 || pwM.indexOf('uncached') >= 0
+        || pwM.indexOf('exceed') >= 0 || pwM.indexOf('too many') >= 0 || pwM.indexOf('limit') >= 0;
+}
+
+async function phReply(toSid: string, rid: string, body: any): Promise<void> {
+    try {
+        var prMsg: any = phState();
+        prMsg.type = 'PH_DONE';
+        prMsg.sid = api.v1.script.id;
+        prMsg.rid = rid;
+        var prK: string;
+        for (prK in body) { prMsg[prK] = body[prK]; }
+        var prErr = phSend(toSid, prMsg);
+        if (prErr) api.v1.error('[' + PH_LABEL + '] REPLY FAILED, answer lost: ' + prErr);
+    } catch (ePr) { api.v1.error('[' + PH_LABEL + '] reply failed:', ePr); }
+}
+
+function phProbeClose(pr: any, t0: number): void {
+    pr.inAfter = phIn();
+    pr.outAfter = phOut();
+    pr.ms = Date.now() - t0;
+}
+
+async function phRun(fromSid: string, d: any): Promise<void> {
+    var rRid = String(d.rid || '');
+    if (_phBusy) { await phReply(fromSid, rRid, { ok: false, err: 'helper busy with another call' }); return; }
+    if (_phLatched) { await phReply(fromSid, rRid, { ok: false, err: 'helper allowance exhausted' }); return; }
+    var rMsgs: any[] = Array.isArray(d.messages) ? d.messages : [];
+    if (!rMsgs.length) { await phReply(fromSid, rRid, { ok: false, err: 'no messages in request' }); return; }
+
+    var rPr: any = null;
+    var rT0 = 0;
+    _phBusy = true;
+    try {
+        if (d.probe === true) {
+            rPr = { pred: await phUncached(rMsgs, String((d.params && d.params.model) || 'xialong-v1')), inBefore: -1, inAfter: -1, outBefore: -1, outAfter: -1, ms: -1 };
+            rPr.predErr = _phPredErr;
+            rPr.outBefore = phOut();
+            rPr.inBefore = phIn();
+            rT0 = Date.now();
+        }
+        var rResp: any = await api.v1.generate(rMsgs, d.params || {}, undefined, 'background');
+        if (rPr) phProbeClose(rPr, rT0);
+        var rText = String((rResp && rResp.choices && rResp.choices[0]
+            && (rResp.choices[0].text
+                || (rResp.choices[0].message && rResp.choices[0].message.content))) || '');
+        _phGens++;
+        _phLastErr = '';
+        var rBody: any = { ok: true, resp: rResp, text: rText };
+        if (rPr) rBody.probe = rPr;
+        await phReply(fromSid, rRid, rBody);
+    } catch (eRg) {
+        var rErr = String((eRg && (eRg as any).message) || eRg || 'unknown generation error');
+        if (rPr && rPr.inAfter < 0) phProbeClose(rPr, rT0 || Date.now());
+        _phLastErr = rErr;
+        if (phIsWall(rErr)) _phLatched = true;
+        var rErrBody: any = { ok: false, err: rErr };
+        if (rPr) rErrBody.probe = rPr;
+        await phReply(fromSid, rRid, rErrBody);
+    } finally {
+        _phBusy = false;
+    }
+}
+
+function phOnMessage(msg: any): void {
+    try {
+        var mD: any = (msg && msg.data) || {};
+        var mT = String(mD.type || '');
+        if (mT.indexOf('PH_') !== 0) return;
+        var mFrom = String((msg && msg.fromScriptId) || mD.sid || '');
+        if (mT === 'PH_PING') {
+            if (!mFrom) return;
+            var mPong: any = phState();
+            mPong.type = 'PH_PONG';
+            mPong.sid = api.v1.script.id;
+            phSend(mFrom, mPong);
+            return;
+        }
+        if (mT === 'PH_WAKE') {
+            _phLatched = false;
+            _phLastErr = '';
+            phAnnounce().catch(function() {});
+            return;
+        }
+        if (mT === 'PH_RUN') {
+            if (!mFrom) return;
+            phRun(mFrom, mD).catch(function(eR: any) { api.v1.error('[' + PH_LABEL + '] run failed:', eR); });
+            return;
+        }
+    } catch (eM) { api.v1.error('[' + PH_LABEL + '] message error:', eM); }
+}
+
+api.v1.hooks.register('onScriptsLoaded', async () => {
+    try {
+        await api.v1.messaging.onMessage(phOnMessage, { channel: PH_CHANNEL });
+        await phAnnounce();
+        api.v1.log('[' + PH_LABEL + '] ready, v' + PH_VERSION + ', output ' + String(phOut())
+            + ', input ' + String(phIn()));
+    } catch (eInit) { api.v1.error('[' + PH_LABEL + '] init failed:', eInit); }
+});
