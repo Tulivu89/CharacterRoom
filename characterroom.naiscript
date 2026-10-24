@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.2
+version: 1.0.3
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.2. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.3. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -42,7 +42,7 @@ SECTIONS (search "SECTION <NAME>")
   K-CONTEXT   onBeforeContextBuild and onContextBuilt, adapters over K
   CR-DATA     CR-only card fields and import sanitizers
   CR-BUBBLE   chat bubble look: record, resolver, the message segmenter, shaped markers
-  CR-UI       shell window, tokens, surfaces, editor portraits, report
+  CR-UI       shell window, tokens, surfaces, editor portraits, report; Chat > Chat opens cards and lists the group
   CR-IMG      image settings, prompt chunks, slot generation
   CR-SCAN     story scan, cast detection, architect and enhance passes
   CR-ILLUS    illustrator
@@ -56,7 +56,7 @@ SECTIONS (search "SECTION <NAME>")
   CR-GALLERY  stored images
   CR-STAGE    visual-novel view of the chat
   MACRO-UI    macro list
-  SCENARIO / USER / CONTACT   card templates, save, import and export
+  SCENARIO / USER / CONTACT   card templates, save, export; smart import (every Import button)
   BUBBLES     markdown helpers, response parser
   LISTINGS    deletion prompt builder
   STARTUP     ui.register, onScriptsLoaded
@@ -10193,18 +10193,19 @@ async function crInsertGreeting() : Promise<void>
 
 function CrPairRow(props: {
   label: string; value: string; empty: boolean; avatar?: string; charId?: string; slot?: string;
-  onOpen: () => void; mobile: boolean;
+  onOpen: () => void; mobile: boolean; onCard?: () => void;
 }) : any
 {
-  return h("div", {
-    class: "cr-pair-row",
+  const who = (hover: boolean, press: boolean, handlers: any) => h("div", Object.assign({
     style: {
-      display: "flex", alignItems: "center", gap: CR_S_3,
-      padding: props.mobile ? "7px 0" : "8px 0",
-      borderTop: CR_LINE_W + " solid " + CR_LINE
-    }
-  },
-    h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, width: props.mobile ? "62px" : "78px", flex: "0 0 auto" } }, props.label),
+      flex: "1 1 auto", minWidth: "0", display: "flex", alignItems: "center", gap: CR_S_3,
+      borderRadius: CR_RADIUS_S, padding: "2px 4px", margin: "-2px -4px",
+      cursor: props.onCard ? "pointer" : "default",
+      background: props.onCard ? crPressBg(hover, press, "transparent") : "transparent"
+    },
+    title: props.onCard ? "Open the card" : "",
+    onClick: props.onCard ? props.onCard : undefined
+  }, props.onCard ? handlers : {}),
     h(CrAvatar, {
       src: props.avatar || "", name: props.empty ? "?" : props.value,
       charId: props.charId, slot: props.slot, size: 26
@@ -10214,8 +10215,67 @@ function CrPairRow(props: {
         flex: "1 1 auto", minWidth: "0", color: props.empty ? CR_DIM : CR_HEAD,
         fontSize: CR_T_BASE, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"
       }
-    }, props.value),
+    }, props.value)
+  );
+  return h("div", {
+    class: "cr-pair-row",
+    style: {
+      display: "flex", alignItems: "center", gap: CR_S_3,
+      padding: props.mobile ? "7px 0" : "8px 0",
+      borderTop: CR_LINE_W + " solid " + CR_LINE
+    }
+  },
+    h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, width: props.mobile ? "62px" : "78px", flex: "0 0 auto" } }, props.label),
+    h(CrPressable, { render: who }),
     h(CrButton, { text: props.empty ? "Pick" : "Change", onClick: props.onOpen })
+  );
+}
+
+// [CR-CHATNAV] From Chat > Chat straight to a card's profile.
+function crOpenCardFromChat(kind: CrCardKind, id: string) : void
+{
+  if (!id){
+    return;
+  }
+  const tab = kind === "user" ? "users" : (kind === "scenario" ? "scenarios" : "contacts");
+  crNav({ surface: "cards", cardTab: tab, openContactId: id, openKind: kind,
+          profileTab: kind === "contact" ? "posts" : "about" });
+}
+
+// [CR-CHATNAV]
+function CrGroupMembersRow(props: { mobile: boolean }) : any
+{
+  const members = crGroupMembers();
+  return h("div", {
+    class: "cr-pair-row",
+    style: {
+      display: "flex", alignItems: "flex-start", gap: CR_S_3,
+      padding: props.mobile ? "7px 0" : "8px 0",
+      borderTop: CR_LINE_W + " solid " + CR_LINE
+    }
+  },
+    h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, width: props.mobile ? "62px" : "78px", flex: "0 0 auto", paddingTop: "5px" } }, "Group"),
+    h("div", { style: { flex: "1 1 auto", minWidth: "0", display: "flex", flexWrap: "wrap", gap: CR_S_2 } },
+      members.length ? members.map((c) => h(CrPressable, {
+        key: c.id,
+        render: (hover: boolean, press: boolean, handlers: any) => h("div", Object.assign({
+          style: {
+            display: "flex", alignItems: "center", gap: CR_S_2, maxWidth: "100%",
+            padding: "3px 9px 3px 3px", borderRadius: "999px", cursor: "pointer",
+            border: CR_LINE_W + " solid " + (crGroupBusyId === c.id ? CR_ACCENT : CR_LINE),
+            background: crPressBg(hover, press, "transparent")
+          },
+          title: crGroupBusyId === c.id ? "Writing a reply — tap to open the card" : "Open the card",
+          onClick: () => { crOpenCardFromChat("contact", c.id); }
+        }, handlers),
+          h(CrAvatar, { src: c.avatar || "", name: c.name, charId: c.id, size: 22 }),
+          h("span", {
+            style: { color: CR_HEAD, fontSize: CR_T_MD, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
+          }, c.alias || c.name)
+        )
+      })) : h("div", { style: { color: CR_DIM, fontSize: CR_T_BASE, paddingTop: "4px" } }, "none")
+    ),
+    h(CrButton, { text: members.length ? "Edit" : "Add", icon: "", onClick: () => crNav({ chatTab: "group" }) })
   );
 }
 
@@ -10234,21 +10294,25 @@ function CrPairingPanel(props: { mobile: boolean }) : any
         value: contact ? (contact.alias || contact.name) : "none",
         empty: !contact, avatar: contact ? contact.avatar : "",
         charId: contact ? contact.id : undefined,
-        onOpen: () => { crOpenCardPicker("contact").catch(() => {}); }
+        onOpen: () => { crOpenCardPicker("contact").catch(() => {}); },
+        onCard: contact ? () => { crOpenCardFromChat("contact", contact.id); } : undefined
       }),
       h(CrPairRow, {
         label: "User", mobile: props.mobile,
         value: user ? user.name : "none",
         empty: !user, charId: user ? user.id : undefined,
-        onOpen: () => { crOpenCardPicker("user").catch(() => {}); }
+        onOpen: () => { crOpenCardPicker("user").catch(() => {}); },
+        onCard: user ? () => { crOpenCardFromChat("user", user.id); } : undefined
       }),
       h(CrPairRow, {
         label: "Scenario", mobile: props.mobile,
         value: scenario ? scenario.name : "none",
         empty: !scenario, charId: scenario ? scenario.id : undefined,
         slot: CR_SLOT_BANNER,
-        onOpen: () => { crOpenCardPicker("scenario").catch(() => {}); }
-      })
+        onOpen: () => { crOpenCardPicker("scenario").catch(() => {}); },
+        onCard: scenario ? () => { crOpenCardFromChat("scenario", scenario.id); } : undefined
+      }),
+      contact ? h(CrGroupMembersRow, { mobile: props.mobile }) : null
     ),
     h("div", { style: { marginTop: CR_S_4 } },
       h(CrField, {
@@ -15755,22 +15819,23 @@ function CrGroupTab(props: { mobile: boolean }) : any
   const members = crGroupMembers();
   const candidates = charList.filter((c) => c.id !== primary.id);
   const sids = Object.keys(crPhHelpers).sort((a, b) => crPhHelpers[a].no - crPhHelpers[b].no);
+  const pick = h(CrSection, {
+    title: members.length ? "Add or remove members" : "Group",
+    note: primary.name + " answers on Send, as always. Everyone picked here gets a button of their own on the "
+      + "toolbar, and answers through a helper script. One reply at a time: a press while another reply is "
+      + "being written is turned away, not queued. Experimental."
+  },
+    h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, marginTop: CR_S_3 } },
+      candidates.length ? candidates.map((c) => h(CrPickRow, {
+        key: c.id, name: c.alias || c.name, sub: c.description || c.persona || "",
+        avatar: c.avatar, charId: c.id, pill: "in group",
+        active: crGroup.members.indexOf(c.id) >= 0,
+        onPick: () => { crGroupToggleMember(c.id).catch(() => {}); }
+      })) : h(CrEmpty, { text: "There is no other Contact to add yet." })
+    )
+  );
   return h("div", { class: "cr-group" },
-    h(CrSection, {
-      title: "Group",
-      note: primary.name + " answers on Send, as always. Everyone picked here gets a button of their own on the "
-        + "toolbar, and answers through a helper script. One reply at a time: a press while another reply is "
-        + "being written is turned away, not queued. Experimental."
-    },
-      h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, marginTop: CR_S_3 } },
-        candidates.length ? candidates.map((c) => h(CrPickRow, {
-          key: c.id, name: c.alias || c.name, sub: c.description || c.persona || "",
-          avatar: c.avatar, charId: c.id, pill: "in group",
-          active: crGroup.members.indexOf(c.id) >= 0,
-          onPick: () => { crGroupToggleMember(c.id).catch(() => {}); }
-        })) : h(CrEmpty, { text: "There is no other Contact to add yet." })
-      )
-    ),
+    members.length ? null : pick,
     members.length ? h(CrSection, {
       title: "Replies",
       note: "Home is where a member's replies go. A spill helper is only used when the one before it refuses, "
@@ -15798,6 +15863,7 @@ function CrGroupTab(props: { mobile: boolean }) : any
       h("div", { style: { marginTop: CR_S_3 } },
         h(CrButton, { text: "Refresh", icon: "", onClick: () => { crPhRefresh().catch(() => {}); } }))
     ),
+    members.length ? pick : null,
     h(CrSection, {
       title: "Probe",
       note: "One line per reply and per native Send: what the script that ran it was charged, against the size of "
@@ -19658,47 +19724,34 @@ async function exportScenario(scriptPermission: ScriptPermission, scenario: Scen
 }
 
 async function importScenario(scriptPermission: ScriptPermission): Promise<void> {
-  const hasPermission = await permissionCheckPassed(scriptPermission);
-  if (!hasPermission){
-    permissionRejectedShowWarning(scriptPermission);
-    return;
+  await crSmartImport(scriptPermission, "scenario");
+}
+
+// [CR-SMARTIMPORT]
+async function crImportScenarioData(data: any) : Promise<CrImported | null>
+{
+  const newScenario = createScenarioTemplate();
+  newScenario.id = data.id || api.v1.uuid();
+  const existingId = scenarioList.findIndex(obj => obj.id === newScenario.id);
+  if (existingId != -1){
+    api.v1.ui.toast("A Scenario with the same id already exists. Canceling import.", {type: "warning"});
+    return null;
   }
-  
-  const file = await api.v1.file.prompt({ accept: '.json' });
-  if (!file) return;
-  
-  try {
-    const data = JSON.parse(file);
-    if (data.cardType){
-      if (data.cardType != "scenario"){
-        api.v1.ui.toast("Card type is not scenario. Canceling import.", {type: "warning"});
-        return;
-      }
-    }
-    const newScenario = createScenarioTemplate();
-    newScenario.id = data.id || api.v1.uuid();
-    const existingId = scenarioList.findIndex(obj => obj.id === newScenario.id);
-    if (existingId != -1){
-      api.v1.ui.toast("A Scenario with the same id already exists. Canceling import.", {type: "warning"});
-      return;
-    }
-    newScenario.author = data.author || DEFAULT_AUTHOR_NAME;
-    newScenario.name = data.name || newScenario.name;
-    newScenario.description = data.description;
-    newScenario.environment = data.environment;
-    newScenario.scene = data.scene;
-    newScenario.tags = data.tags;
-    if (data.brains && Array.isArray(data.brains)) newScenario.brains = data.brains;
-    if (data.brainsConditional && Array.isArray(data.brainsConditional)){
-      newScenario.brainsConditional = data.brainsConditional;
-    }
-    newScenario.cr = crSanitizeScenarioExtra(data.cr);
-    scenarioList.push(newScenario);
-    await saveScenarioList();
-    crTouch();
-  } catch (e) {
-    api.v1.error('Failed to import scenario:', e);
+  newScenario.author = data.author || DEFAULT_AUTHOR_NAME;
+  newScenario.name = data.name || newScenario.name;
+  newScenario.description = data.description;
+  newScenario.environment = data.environment;
+  newScenario.scene = data.scene;
+  newScenario.tags = data.tags;
+  if (data.brains && Array.isArray(data.brains)) newScenario.brains = data.brains;
+  if (data.brainsConditional && Array.isArray(data.brainsConditional)){
+    newScenario.brainsConditional = data.brainsConditional;
   }
+  newScenario.cr = crSanitizeScenarioExtra(data.cr);
+  scenarioList.push(newScenario);
+  await saveScenarioList();
+  crTouch();
+  return { id: newScenario.id, name: newScenario.name };
 }
 
 const CARD_BRAIN_FILE_TYPE = "cardBrainsAlone";
@@ -19832,50 +19885,37 @@ async function exportUser(scriptPermission: ScriptPermission, user: User): Promi
 }
 
 async function importUser(scriptPermission: ScriptPermission): Promise<void> {
-  const hasPermission = await permissionCheckPassed(scriptPermission);
-  if (!hasPermission){
-    permissionRejectedShowWarning(scriptPermission);
-    return;
+  await crSmartImport(scriptPermission, "user");
+}
+
+// [CR-SMARTIMPORT]
+async function crImportUserData(data: any) : Promise<CrImported | null>
+{
+  const newUser = createUserTemplate();
+  newUser.id = data.id || api.v1.uuid();
+  const existingId = userList.findIndex(obj => obj.id === newUser.id);
+  if (existingId != -1){
+    api.v1.ui.toast("A User with the same id already exists. Canceling import.", {type: "warning"});
+    return null;
   }
-  
-  const file = await api.v1.file.prompt({ accept: '.json' });
-  if (!file) return;
-  
-  try {
-    const data = JSON.parse(file);
-    if (data.cardType){
-      if (data.cardType != "user"){
-        api.v1.ui.toast("Card type is not user. Canceling import.", {type: "warning"});
-        return;
-      }
-    }
-    const newUser = createUserTemplate();
-    newUser.id = data.id || api.v1.uuid();
-    const existingId = userList.findIndex(obj => obj.id === newUser.id);
-    if (existingId != -1){
-      api.v1.ui.toast("A User with the same id already exists. Canceling import.", {type: "warning"});
-      return;
-    }
-    newUser.author = data.author || DEFAULT_AUTHOR_NAME;
-    newUser.name = data.name || newUser.name;
-    newUser.description = data.description;
-    newUser.species = data.species;
-    newUser.gender = data.gender;
-    newUser.pronouns = data.pronouns;
-    newUser.persona = data.persona;
-    newUser.appearance = data.appearance;
-    newUser.tags = data.tags;
-    if (data.brains && Array.isArray(data.brains)) newUser.brains = data.brains;
-    if (data.brainsConditional && Array.isArray(data.brainsConditional)){
-      newUser.brainsConditional = data.brainsConditional;
-    }
-    newUser.cr = crSanitizeUserExtra(data.cr);
-    userList.push(newUser);
-    await saveUserList();
-    crTouch();
-  } catch (e) {
-    api.v1.error('Failed to import user:', e);
+  newUser.author = data.author || DEFAULT_AUTHOR_NAME;
+  newUser.name = data.name || newUser.name;
+  newUser.description = data.description;
+  newUser.species = data.species;
+  newUser.gender = data.gender;
+  newUser.pronouns = data.pronouns;
+  newUser.persona = data.persona;
+  newUser.appearance = data.appearance;
+  newUser.tags = data.tags;
+  if (data.brains && Array.isArray(data.brains)) newUser.brains = data.brains;
+  if (data.brainsConditional && Array.isArray(data.brainsConditional)){
+    newUser.brainsConditional = data.brainsConditional;
   }
+  newUser.cr = crSanitizeUserExtra(data.cr);
+  userList.push(newUser);
+  await saveUserList();
+  crTouch();
+  return { id: newUser.id, name: newUser.name };
 }
 
 // ============================================================================
@@ -19918,12 +19958,158 @@ async function reflectCharChangesInChatSettings(char: Character) : Promise<void>
 }
 
 async function importCharacter(scriptPermission: ScriptPermission): Promise<void> {
+  await crSmartImport(scriptPermission, "contact");
+}
+
+// [CR-SMARTIMPORT]
+async function crImportContactData(data: any) : Promise<CrImported | null>
+{
+  const newChar = createCharTemplate();
+  newChar.id = data.id || api.v1.uuid();
+  const existingId = charList.findIndex(obj => obj.id === newChar.id);
+  if (existingId != -1){
+    api.v1.ui.toast("A Contact with the same id already exists. Canceling import.", {type: "warning"});
+    return null;
+  }
+  newChar.author = data.author || DEFAULT_AUTHOR_NAME;
+  newChar.name = data.name || 'Imported Character';
+  newChar.alias = data.alias || "";
+  newChar.description = data.description;
+  newChar.gender = data.gndr || data.gender;
+  newChar.pronouns = data.pronouns;
+  newChar.species = data.species;
+  newChar.tags = data.tags;
+  newChar.persona = data.persona;
+  newChar.appearance = data.appearance;
+  newChar.greeting = data.greeting;
+  newChar.greetingEmotion = data.greetingEmotion;
+  newChar.defaultIntimacy = data.relationship || 'stranger';
+  newChar.defaultStyle = data.style || 'chat';
+  newChar.cjk = data.cjk;
+  if (data.brains && Array.isArray(data.brains)) newChar.brains = data.brains;
+  if (data.brainsConditional && Array.isArray(data.brainsConditional)){
+    newChar.brainsConditional = data.brainsConditional;
+  }
+  newChar.cr = crSanitizeContactExtra(data.cr);
+
+  if (data.avatarUri && typeof data.avatarUri === 'string' && data.avatarUri.startsWith('data:')) {
+    newChar.avatar = data.avatarUri;
+  }
+
+  if (data.emotions && typeof data.emotions === 'object') {
+    const emotionNames = Object.keys(data.emotions);
+    for (let i = 0; i < emotionNames.length; i++) {
+      const emotionName = emotionNames[i];
+      const emotionData = data.emotions[emotionName];
+      if (emotionData && typeof emotionData === 'string' && emotionData.startsWith('data:')) {
+        newChar.emotions[emotionName] = emotionData;
+      }
+    }
+  }
+
+  newChar.schedule = {
+    Daily: [],
+    Monday: [],
+    Tuesday: [],
+    Wednesday: [],
+    Thursday: [],
+    Friday: [],
+    Saturday: [],
+    Sunday: []
+  }
+
+  if (data.schedule && typeof data.schedule === 'object') {
+    for (const day of DAY_LIST){
+      newChar.schedule[day] = data.schedule[day];
+    }
+  }
+
+  if (data.exampleMessages && Array.isArray(data.exampleMessages)) {
+    newChar.exampleChats = [];
+    for (let i = 0; i < data.exampleMessages.length; i++) {
+      const ec = data.exampleMessages[i];
+      const newEc = { name: ec.name || 'Example', style: ec.style || 'chat', userName: ec.userName || 'Example User', messages: [] as ExampleMessage[] };
+      if (ec.messages && Array.isArray(ec.messages)) {
+        for (let j = 0; j < ec.messages.length; j++) {
+          const m = ec.messages[j];
+          newEc.messages.push({ isContact: m.isContact, text: m.text, emotion: m.emotion || 'neutral' });
+        }
+      }
+      newChar.exampleChats.push(newEc);
+    }
+  }
+
+  charList.push(newChar);
+  await saveCharList();
+  crTouch();
+  return { id: newChar.id, name: newChar.name };
+}
+
+// [CR-SMARTIMPORT] Every Import button reads the file first and files the card by what it is.
+type CrImported = { id: string; name: string };
+type CrImportClass = { kind: CrCardKind; refuse: string };
+
+const CR_IMPORT_LABEL: Record<CrCardKind, string> = { contact: "Contact", user: "User", scenario: "Scenario" };
+const CR_IMPORT_TAB: Record<CrCardKind, string> = { contact: "contacts", user: "users", scenario: "scenarios" };
+// Fields only a Contact card carries (AR and AetherRoom names included) and only a Scenario card carries.
+const CR_IMPORT_CONTACT_MARKS: string[] = ["greeting", "greetingEmotion", "exampleMessages", "emotions",
+  "avatarUri", "relationship", "gndr", "schedule", "alias", "cjk"];
+const CR_IMPORT_SCENARIO_MARKS: string[] = ["environment", "scene"];
+
+function crImportHasAny(data: any, keys: string[]) : boolean
+{
+  for (let i = 0; i < keys.length; i++){
+    const v = data[keys[i]];
+    if (v !== undefined && v !== null && v !== ""){
+      return true;
+    }
+  }
+  return false;
+}
+
+// cardType decides when present; otherwise the fields do; a file that says nothing goes where it was imported.
+function crClassifyCardFile(data: any, pressed: CrCardKind) : CrImportClass
+{
+  if (!data || typeof data !== "object" || Array.isArray(data)){
+    return { kind: pressed, refuse: "That file is not a card." };
+  }
+  const fileType = typeof data.fileType === "string" ? data.fileType.trim() : "";
+  if (fileType === CARD_BRAIN_FILE_TYPE){
+    return { kind: pressed, refuse: "That file holds brains, not a card \u2014 import it from a card's Brains tab." };
+  }
+  if (fileType === REMEMBER_ME_FILE_TYPE_ID){
+    return { kind: pressed, refuse: "That file holds jots, not a card \u2014 import it from the Jots list." };
+  }
+  if (fileType){
+    return { kind: pressed, refuse: "That file is a " + fileType + " export, not a card." };
+  }
+  const cardType = typeof data.cardType === "string" ? data.cardType.trim().toLowerCase() : "";
+  if (cardType === "contact" || cardType === "user" || cardType === "scenario"){
+    return { kind: cardType, refuse: "" };
+  }
+  if (cardType){
+    return { kind: pressed, refuse: "That card is marked \"" + cardType + "\", which CharacterRoom does not import." };
+  }
+  if (typeof data.spec === "string" && data.spec.trim()){
+    return { kind: pressed, refuse: "That is a " + data.spec.trim() + " card, which CharacterRoom does not read." };
+  }
+  if (crImportHasAny(data, CR_IMPORT_CONTACT_MARKS)){
+    return { kind: "contact", refuse: "" };
+  }
+  if (crImportHasAny(data, CR_IMPORT_SCENARIO_MARKS)){
+    return { kind: "scenario", refuse: "" };
+  }
+  return { kind: pressed, refuse: "" };
+}
+
+async function crSmartImport(scriptPermission: ScriptPermission, pressed: CrCardKind) : Promise<void>
+{
   const hasPermission = await permissionCheckPassed(scriptPermission);
   if (!hasPermission){
     permissionRejectedShowWarning(scriptPermission);
     return;
   }
-  
+
   const picked = await crCardImportPick();
   if (picked.kind === "cancelled"){
     return;
@@ -19950,99 +20136,46 @@ async function importCharacter(scriptPermission: ScriptPermission): Promise<void
 
   let committed = false;
   try {
-    const data = JSON.parse(file);
-    if (data.cardType){
-      if (data.cardType != "contact"){
-        api.v1.ui.toast("Card type is not contact. Canceling import.", {type: "warning"});
-        return;
-      }
+    let data: any;
+    try {
+      data = JSON.parse(file);
     }
-    const newChar = createCharTemplate();
-    newChar.id = data.id || api.v1.uuid();
-    const existingId = charList.findIndex(obj => obj.id === newChar.id);
-    if (existingId != -1){
-      api.v1.ui.toast("A Contact with the same id already exists. Canceling import.", {type: "warning"});
+    catch (e){
+      api.v1.ui.toast("That file is not valid JSON.", {type: "warning"});
       return;
     }
-    newChar.author = data.author || DEFAULT_AUTHOR_NAME;
-    newChar.name = data.name || 'Imported Character';
-    newChar.alias = data.alias || "";
-    newChar.description = data.description;
-    newChar.gender = data.gndr || data.gender;
-    newChar.pronouns = data.pronouns;
-    newChar.species = data.species;
-    newChar.tags = data.tags;
-    newChar.persona = data.persona;
-    newChar.appearance = data.appearance;
-    newChar.greeting = data.greeting;
-    newChar.greetingEmotion = data.greetingEmotion;
-    newChar.defaultIntimacy = data.relationship || 'stranger';
-    newChar.defaultStyle = data.style || 'chat';
-    newChar.cjk = data.cjk;
-    if (data.brains && Array.isArray(data.brains)) newChar.brains = data.brains;
-    if (data.brainsConditional && Array.isArray(data.brainsConditional)){
-      newChar.brainsConditional = data.brainsConditional;
+    const cls = crClassifyCardFile(data, pressed);
+    if (cls.refuse){
+      api.v1.ui.toast(cls.refuse, {type: "warning"});
+      return;
     }
-    newChar.cr = crSanitizeContactExtra(data.cr);
-
-    if (data.avatarUri && typeof data.avatarUri === 'string' && data.avatarUri.startsWith('data:')) {
-      newChar.avatar = data.avatarUri;
+    let made: CrImported | null = null;
+    if (cls.kind === "contact"){
+      made = await crImportContactData(data);
     }
-
-    if (data.emotions && typeof data.emotions === 'object') {
-      const emotionNames = Object.keys(data.emotions);
-      for (let i = 0; i < emotionNames.length; i++) {
-        const emotionName = emotionNames[i];
-        const emotionData = data.emotions[emotionName];
-        if (emotionData && typeof emotionData === 'string' && emotionData.startsWith('data:')) {
-          newChar.emotions[emotionName] = emotionData;
-        }
-      }
+    else if (cls.kind === "user"){
+      made = await crImportUserData(data);
     }
-
-    newChar.schedule = {
-      Daily: [],
-      Monday: [],
-      Tuesday: [],
-      Wednesday: [],
-      Thursday: [],
-      Friday: [],
-      Saturday: [],
-      Sunday: []
+    else {
+      made = await crImportScenarioData(data);
     }
-
-    if (data.schedule && typeof data.schedule === 'object') {
-      for (const day of DAY_LIST){
-        newChar.schedule[day] = data.schedule[day];
-      }
+    if (!made){
+      return;
     }
-
-    if (data.exampleMessages && Array.isArray(data.exampleMessages)) {
-      newChar.exampleChats = [];
-      for (let i = 0; i < data.exampleMessages.length; i++) {
-        const ec = data.exampleMessages[i];
-        const newEc = { name: ec.name || 'Example', style: ec.style || 'chat', userName: ec.userName || 'Example User', messages: [] as ExampleMessage[] };
-        if (ec.messages && Array.isArray(ec.messages)) {
-          for (let j = 0; j < ec.messages.length; j++) {
-            const m = ec.messages[j];
-            newEc.messages.push({ isContact: m.isContact, text: m.text, emotion: m.emotion || 'neutral' });
-          }
-        }
-        newChar.exampleChats.push(newEc);
-      }
-    }
-
-    charList.push(newChar);
-    await saveCharList();
-    crTouch();
-
-    if (ticket){
+    // A Scenario has no portrait slots, so anything the bridge lifted out of one is dropped.
+    if (ticket && cls.kind !== "scenario"){
       committed = true;
-      crCardImportCommit(ticket, newChar.id);
+      crCardImportCommit(ticket, made.id);
     }
-
+    if (cls.kind !== pressed){
+      crNav({ cardTab: CR_IMPORT_TAB[cls.kind] });
+    }
+    try{ await api.v1.ui.toast("Imported " + (made.name || "a card") + " as a " + CR_IMPORT_LABEL[cls.kind] + ".", { type: "success" }); }
+    catch (e){}
   } catch (e) {
-    api.v1.error('Failed to import character:', e);
+    api.v1.error('[CR:import] could not import the card:', e);
+    try{ await api.v1.ui.toast("That card could not be imported.", { type: "error" }); }
+    catch (e2){}
   }
   finally {
     if (ticket && !committed){
