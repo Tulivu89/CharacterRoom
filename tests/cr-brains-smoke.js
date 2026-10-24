@@ -192,7 +192,7 @@ const flat = (n, out) => { out = out || []; if (n == null || typeof n !== 'objec
   ok('conditional: suppressed, it does not fire', JSON.stringify(r).indexOf('Mira has a sister.') < 0, r);
   const vis = X.crAssembleCharacterPrompt()(MIRA, 'illustrate');
   ok('image: the variant in use joins the character prompt', /grey hoodie, jeans/.test(vis.visuals), vis);
-  const prev = X.crAssembleCharacterPrompt()(MIRA, 'avatar', { setId: 'sOutfit1', variantId: 'vFormal1' });
+  const prev = X.crAssembleCharacterPrompt()(MIRA, 'avatar', { only: { setId: 'sOutfit1', variantId: 'vFormal1' } });
   ok('image: a variant preview uses that variant, not the one in use', /black evening dress/.test(prev.visuals) && !/grey hoodie/.test(prev.visuals) && /hoodie/.test(prev.uc), prev);
   const sc = X.crSceneBasePrompt()();
   ok('image: the Scenario\'s variant joins the scene base', sc.base === 'port town, harbour at night', sc);
