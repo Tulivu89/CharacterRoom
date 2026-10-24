@@ -1,6 +1,7 @@
 // Tests for cr-scene-v2.ts. Run: cat stubs + cr-scene-v2.ts + this file into one .ts and
 // execute with `node --experimental-strip-types`. The stubs stand in for engine symbols.
-// [CR] Vendored from the image-prompt review (v1.2). cr-imgv5-smoke.js runs it against the whole engine.
+// [CR] Vendored from the image-prompt review (v1.2). 1.0.9: the cards' outfits are written as a Clothes set,
+// which is what engine 1.0.9 turns them into (D-114); the expectations are unchanged. cr-imgv5-smoke.js runs it against the whole engine.
 
 let pass = 0, fail = 0;
 function eq(name: string, got: any, want: any)
@@ -18,11 +19,11 @@ function has(name: string, hay: string, needle: string, yes: boolean = true)
 
 const sunny: any = { id: "c1", name: "Sunny", alias: "Sun", gender: "female", species: "cat girl",
   cr: { img: { universalPrompt: "girl, cat girl, tabby cat ears, orange hair, green eyes",
-    universalUC: "extra ears",
-    outfits: [ { id: "o1", label: "casual", prompt: "white tank top, denim shorts, sneakers", uc: "skirt", active: true } ] } } };
+    universalUC: "extra ears" },
+    sets: [ { id: "sOutfits", name: "Outfit", wear: true, variants: [ { id: "o1", name: "casual", content: "", prompt: "white tank top, denim shorts, sneakers", uc: "skirt" } ] } ] } };
 const marco: any = { id: "c2", name: "Marco", gender: "Male", species: "",
-  cr: { img: { universalPrompt: "boy, short hair, black hair, stubble", handle: "man in apron",
-    outfits: [ { id: "o2", label: "chef", prompt: "white apron, black shirt", uc: "", active: true } ] } } };
+  cr: { img: { universalPrompt: "boy, short hair, black hair, stubble", handle: "man in apron" },
+    sets: [ { id: "sOutfits", name: "Outfit", wear: true, variants: [ { id: "o2", name: "chef", content: "", prompt: "white apron, black shirt" } ] } ] } };
 const mira: any = { id: "c3", name: "Mira Vale", gender: "woman", species: "elf",
   cr: { img: { universalPrompt: "girl, elf, pointy ears, silver hair" } } };
 const cast = [sunny, marco];
@@ -153,8 +154,8 @@ has("b13 split across lines", b13.prompt, "1girl, 1boy, wide shot, outdoors, str
 
 // --- framing hides on a real-world caption: underscores, newlines, weights
 const punk: any = { id: "c4", name: "Vex", gender: "female", species: "",
-  cr: { img: { universalPrompt: "girl, punk, Goth_fashion,\nvery_long_hair, blonde_hair, green_eyes,\n0.7::large_breasts::, slender,",
-    outfits: [ { id: "o4", label: "punk", prompt: "ripped_jeans, combat_boots, belt, chains, band_t-shirt, 1.2::black thighhighs, white boots::", uc: "", active: true } ] } } };
+  cr: { img: { universalPrompt: "girl, punk, Goth_fashion,\nvery_long_hair, blonde_hair, green_eyes,\n0.7::large_breasts::, slender," },
+    sets: [ { id: "sOutfits", name: "Outfit", wear: true, variants: [ { id: "o4", name: "punk", content: "", prompt: "ripped_jeans, combat_boots, belt, chains, band_t-shirt, 1.2::black thighhighs, white boots::" } ] } ] } };
 const b14 = crBuildScene(crParseScene("upper body, from below, indoors, bedroom, night. Woman leans back on desk, grinning.\n@Vex: sitting, evil grin, looking at viewer\nrating:general", [punk]), [punk]);
 has("b14 combat boots dropped", b14.characters[0].visuals, "combat_boots", false);
 has("b14 jeans kept at upper body", b14.characters[0].visuals, "ripped_jeans");

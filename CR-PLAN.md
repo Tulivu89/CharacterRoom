@@ -1,6 +1,6 @@
 # CharacterRoom — Plan & Inventory (CR-PLAN)
 
-**Doc version** 0.78 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
+**Doc version** 0.79 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
 the last three are the random-name tables · **Target artifacts** `characterroom-vX.naiscript`
 (engine, LF) and the **shared bridge** — CE's bridge extended to serve both engines (D-15)
 
@@ -51,6 +51,9 @@ the last three are the random-name tables · **Target artifacts** `characterroom
 | D-25 | **CR 0.0.x ships AnotherRoom's UI under CR names** with the kernel inside. The JSX shell replaces those doors in P4. | Every build is importable and complete; nothing waits on the shell to be usable. |
 | D-21 | **Editor portraits are painted by the bridge** (was O-10). | The mechanism exists live today in CE's STORYIMG path: the engine creates a **node widget** holding a 1px transparent **sentinel text** (`ce-storyimg:<id>`); the bridge finds it with a TreeWalker, re-scans on a debounced MutationObserver, climbs a bounded number of ancestors to the widget's own box, and paints there. CR's avatar uses the same channel with the older CharChat sentinel `ce-chatava:` — the bridge still parses `id\|emotion` and still has `_ccavFindSentinels`, `_ccavContainerFor` and `_ccavSettings`; only `_ccavPaintOne` is gone and is rebuilt on `_ceStoryImgRender`'s pattern. No image bytes cross into the worker. §6.8. |
 | D-22 | **Display options: account default, per-Contact override** (was O-11). | Stored on the Contact card as `display?`; resolved by one function (§6.8). |
+| D-116 | **Plan-only changes go straight to `main`;** engine and test changes still go through a branch and a PR. The plan lives only in the repo; the project copy under `claude/` is a convenience snapshot. | Author's call. Closes D-105's worry about the plan being out of step between accounts: whoever works on the plan pushes it to the one place. |
+| D-115 | **Illustrate, streamlined.** Compose has three sections: Scene, Who is in it, Generate. Who is in it lists each picked person's sets that have more than one version, so this picture can wear another outfit (or any set's version) without changing the chat's (`crIllus.picks`, in memory; picking the chat's own version clears it). The separate Location and What gets sent sections and the chunk lines under Generate are folded into one **What gets sent** toggle beside Generate, closed by default: the location line, the whole prompt in send order (start chunks, scene, after-scene chunks, location and card base, end chunks), each caption with its negative, and the full negative. **Built in engine 1.0.9.** | Author: the menu had two blocks of prompt text and no way to swap an outfit for one picture. The prompt it shows is the one the bridge assembles, so what you read is what is sent. |
+| D-114 | **The Images tab's Outfits are gone; outfits are sets** (supersedes D-107's "image-only outfits stay as layers"). A set gains **Clothes** (`wear`), on by default for a new Contact or User set: a scene's `@Name wears:` line replaces a Clothes set's image prompt. Cards carrying old outfits are converted once at load (and on import) into an `Outfit` Clothes set: the outfits that were on lead (joined as `Worn` when several were, a bare `None` when none were), so every picture is unchanged; the versions carry no brain text, so context is unchanged too. **Built in engine 1.0.9.** | Author: the outfits field duplicated what sets now do, and sets add the per-story switch, pictures and Chat > Brains. Variant ids are fixed (`oWorn`, `oNone`, `o1`…) so a re-conversion picks the same ones. `cr-imgv5-smoke.js` pins the conversion; the review's scene tests now give their cards a Clothes set and pass unchanged. |
 | D-113 | **An image's people are the chat's people.** Scan, Enhance and photos list the paired Contact, its group members and the User (`crChatCast`) instead of every card named in the text, and the composer's picker offers only them (every card only when no Contact is paired). Photos list the sender, then chat members the description names, then the rest, up to four. An `@` line that uses a description instead of a name (`@woman`, `@wolf-man`) resolves to the one chat member whose species or kind fits, hyphens read as spaces; a fit two members share stays unknown. The writer is told to put the listed name after `@`. **Built in engine 1.0.8.** | Author's live test of 1.0.7: the writer wrote `@woman` and `@wolf-man`, and name detection in the story text missed people who were plainly present; the picker listed every card. The chat already knows who is in it, so the writer no longer has to guess. Pinned in `cr-imgv5-smoke.js`. |
 | D-112 | **A chunk has a position: Start, After scene, or End** (`spot`; missing = End). The base caption is sent as start chunks → scene → after-scene chunks → location and card base → end chunks; Presets shows that order. Bridge 3.0.38 places them (`settings.qualityStart` / `qualityMid`, and `imgSpots` in the ACK); for an older bridge `crImgSend` folds them into the prompt so the order still holds. **Built in engine 1.0.8, bridge 3.0.38.** | Author: V4.5 is strongly order-sensitive, so the author, not the script, decides where a chunk falls. End stays the default because the site appends its quality tags last (D-110). The UC is unchanged (chunks, then base UC). The review's chunk test compares only `quality`/`negative` now that the result carries the spots. |
 | D-111 | **On a phone, Chat > Brains shows one line per brain.** A row is its name and switch; tapping the name opens its text, a set's versions, or a conditional entry's Auto / Always / Off. A suppressed row keeps its pill so it still reads as off. Desktop is unchanged. **Built in engine 1.0.7.** | Author's screenshot: every row's preview made the tab a wall of text on mobile. Which rows are open is in-memory only (`crBrainOpen`), so a reload folds them again. Pinned in `cr-imgv5-smoke.js`. |
@@ -1128,6 +1131,23 @@ precedent for a full-window jsx scene whose figures the bridge paints with no br
 precedent for moving one with inline transforms. O-18's location variants are the rooms, each with its own backdrop
 slot — an aerial prompt per place (from above, isometric room).
 
+**Proposal (engine 1.0.9 session, awaiting the author).** Not a mode but a **Home** surface beside Stage and Posts; the
+chat goes on as before and Home reads and writes the same state, so dropping in for a chat never leaves anything.
+- **Rooms are the Scenario's Location set, outfits the Contact's Clothes set** (D-107, D-114). Moving rooms or changing
+  clothes in Home is picking a variant, so the chat's brains and every picture already follow. Each room variant's
+  picture is its aerial backdrop; spots are zones tapped onto it, kept on the variant as percentages.
+- **The figure** is the Contact's emotion portrait at its spot, painted like the Stage (§6.8b), group members beside it.
+  Where they stand comes from the schedule (D-14) when one says, else from the last thing done.
+- **Needs** are Games resources (D-91) the author defines per Contact (meters, decay per hour, a floor that changes the
+  emotion shown). Decay is arithmetic on elapsed time at open — nothing runs while away.
+- **Actions** (feed, rest, play, talk, change clothes, go to a room) are buttons with author-set effects on needs; no
+  generation. An optional one-line reaction uses the Games React path (one press, one generation, never the story).
+- **While you were away**: on open, the gap replays deterministically (seeded) into a short list of events — room moves,
+  needs crossing a floor, scheduled activities; **Catch up** narrates them in one generation, in the Contact's voice,
+  as a log on Home. Send to chat drops one entry into the story; Snapshot pictures the moment through Illustrate.
+- **Into the chat**, optionally, one system line of state ("Mira is tired and in the kitchen"), the D-93 dice-line
+  precedent — off by default.
+
 **Open before a design**: real clock or story clock for this mode (D-08; leaning real); how a spot is defined (named
 zones set by tapping the backdrop, stored as percentages); whether needs reach chat context at all (D-91 said no for
 dice; a one-line system note like D-93's dice line is the alternative); what a catch-up costs on the main script's
@@ -1297,6 +1317,8 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ---
 
 ## 10. Changelog
+
+- **0.79** — engine 1.0.9: D-114 (outfits become Clothes sets), D-115 (Illustrate streamlined; per-picture set swap), D-116 (plan changes go straight to main). Tamagotchi proposal added to §6.12. `cr-imgv5-smoke.js` 54.
 
 - **0.78** — engine 1.0.8 and bridge 3.0.38: D-112 (chunk positions: Start / After scene / End), D-113 (an image's people are the chat's; `@` lines resolve by species or kind). `cr-imgv5-smoke.js` 44, bridge check 7.
 
@@ -1491,7 +1513,7 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ## 11. Handoff — next session
 
 **Start here.** Read the engine's frontmatter through CR-INDEX, the bridge's CE-INDEX, and
-§1.1/§5/§9 of this document. Current builds: **engine 1.0.8** (GitHub `Tulivu89/CharacterRoom`, the source of truth, D-105), **bridge 3.0.38** (project files of both CR and CE), **CR Persona Helper 0.0.4** (the repo carries helper scripts 0.2.0).
+§1.1/§5/§9 of this document. Current builds: **engine 1.0.9** (GitHub `Tulivu89/CharacterRoom`, the source of truth, D-105), **bridge 3.0.38** (project files of both CR and CE), **CR Persona Helper 0.0.4** (the repo carries helper scripts 0.2.0).
 **Corrected at v0.57**: this line had said engine 0.0.49 since v0.46, and the plan itself stopped at
 D-73 while the engine reached D-83; D-74–D-83 were backfilled from the CR-INDEX in this revision.
 Smart import adds `cr-import-smoke.js`, Chat navigation adds `cr-chatnav-smoke.js`, folders add `cr-folders-smoke.js`, brain sets add `cr-brains-smoke.js`, image v1.2 adds `cr-imgv5-smoke.js` (it runs the review's `cr-scene-v2.test.ts` and `cr-img-chunks.test.ts` inside the engine), group chat adds `cr-group-smoke.js` to the checks run before returning an engine patch, the Games tab adds `cr-rpg-smoke.js`, and bubbles add `cr-bubble-smoke.js`.
@@ -1612,7 +1634,7 @@ dead since v0.1 and it still cost two patches.
 
 ### 11.3 Open, in rough order
 
-00. ~~**Image prompts for V5**~~ — **built, engine 1.0.7 / bridge 3.0.37 (D-109, D-110)**; open only for the live checks in §11.4 and review §9 (GLM-4.6 on three saved stories; one CR-made V5 image's metadata against the site's fields; an A/B on a locked seed). Original note: (author's item 5, 2026-10-24). `CR-IMAGE-PROMPTS-v1_0_0.md` carries the Architect and Enhance prompts verbatim, their feeders, the assembly and the request body, for the author's prompt project. When reworked prompts come back, the swap is the strings in CR-SCAN (and Enhance's JSON keys in `crEnhanceScene` if they change); nothing else moves. Found while extracting, and live in 1.0.1: the Scan cast block says *name them* and the reminder under it says *do not name them* — the renderer never receives a name, so the reminder is the right one; and Enhance asks for tags only, so Scan → Enhance always discards the prose the Architect writes for V5. **Unverified**: whether V5 wants a different payload from the V4.5 body the bridge sends for every model id (`v4_prompt`, `params_version: 3`, `k_euler_ancestral` / `karras`).
+00. ~~**Image prompts for V5**~~ — **built, engine 1.0.7 / bridge 3.0.37 (D-109, D-110); live checks closed by the author 2026-10-24**. Was open for the live checks in §11.4 and review §9 (GLM-4.6 on three saved stories; one CR-made V5 image's metadata against the site's fields; an A/B on a locked seed). Original note: (author's item 5, 2026-10-24). `CR-IMAGE-PROMPTS-v1_0_0.md` carries the Architect and Enhance prompts verbatim, their feeders, the assembly and the request body, for the author's prompt project. When reworked prompts come back, the swap is the strings in CR-SCAN (and Enhance's JSON keys in `crEnhanceScene` if they change); nothing else moves. Found while extracting, and live in 1.0.1: the Scan cast block says *name them* and the reminder under it says *do not name them* — the renderer never receives a name, so the reminder is the right one; and Enhance asks for tags only, so Scan → Enhance always discards the prose the Architect writes for V5. **Unverified**: whether V5 wants a different payload from the V4.5 body the bridge sends for every model id (`v4_prompt`, `params_version: 3`, `k_euler_ancestral` / `karras`).
 
 0. **Three things measured this session and not yet acted on.** (a) The contact importer does
    not validate `relationship` against `INTIMACY_LIST` (engine ~L19204), so a card carrying
@@ -1690,6 +1712,8 @@ dead since v0.1 and it still cost two patches.
    Number Guess still open only from the CR Games panel.
 
 ### 11.4 Live-test items the author has not yet been able to confirm
+
+- **Outfits as sets and Illustrate** (1.0.9): a Contact that had outfits should now have an Outfit set on its Brains tab (Clothes on), led by the outfit(s) that were worn, and its pictures should look as before. Compose: pick two people; each one's sets appear under the picker; pick another outfit, Generate, and confirm the picture wears it while Chat > Brains still shows the chat's. What gets sent is closed until tapped, and holds the location, the whole prompt and the negative.
 
 - **Chunk positions and chat people** (1.0.8 + bridge 3.0.38): Global > Report should say "bridge chunk spots: yes". On Presets set an artist chunk to Start and a style chunk to After scene; Order sent should read start → scene → after scene → location and card base → end, and a V4.5 image's metadata should show the same order. In a group chat, Compose's Who is in it should list only the Contact, the members and the User; Scan should pick the ones in view even when the text never names them, and `@woman` / `@wolf-man` style lines should land on the right people.
 

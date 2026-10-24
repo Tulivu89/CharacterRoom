@@ -1,7 +1,7 @@
 // ============================================================================
 // cr-imgv5-smoke.js — the image pipeline from CR-IMAGE-PROMPTS v1.2  [CR-IMGV5]
 //
-// Pins engine 1.0.7 (D-109, D-110) and 1.0.8 (D-112, D-113): the review's own tests (cr-scene-v2.test.ts, 67 cases;
+// Pins engine 1.0.7 (D-109, D-110) 1.0.8 (D-112, D-113) and 1.0.9 (D-114, D-115): the review's own tests (cr-scene-v2.test.ts, 67 cases;
 // cr-img-chunks.test.ts, 26 cases) run inside the whole engine, then the engine's wiring:
 // User detection, Generate / Enhance / photo payloads on GLM-4.6 with thinking off, picked people
 // always drawn, POV photos draw nobody, slot prompts, emotion defaults, per-model tuning, the
@@ -115,7 +115,7 @@ async function load(env) {
         'crIllusEnhance', 'crIllusGenerate', 'crIllusShown', 'crChatImgBuildPrompt', 'crDetectCast', 'crAssembleCharacterPrompt',
         'crGenerateSlot', 'crSlotTag', 'crImgFields', 'crImgSettings', 'crCompileImgFields', 'crImgPickModel',
         'CrChatBrainsTab', 'crBrainOpen', 'CR_ARCH_INSTRUCTION', 'CR_ARCH_PHOTO_INSTRUCTION', 'crSanitizeContactExtra',
-        'crImgAddStandard', 'CR_IMG_FIELDS_STANDARD', 'crPostsImgAsk', 'crChatCast', 'crParseScene', 'crGroup', 'CrIllusComposer', 'crArchitectScene', 'crGroupLoad'];
+        'crImgAddStandard', 'CR_IMG_FIELDS_STANDARD', 'crPostsImgAsk', 'crChatCast', 'crParseScene', 'crGroup', 'CrIllusComposer', 'crArchitectScene', 'crGroupLoad', 'crIllusPick', 'crCardSets', 'crSetActiveVariant'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -312,6 +312,39 @@ const PAIRED = (extra) => Object.assign({ storage: { characterListKey: [SUNNY, M
   ok('scan: the writer is told to use names after @', /never the handle/.test(X.CR_ARCH_INSTRUCTION()));
   strs = flat(X.CrIllusComposer()({ st: { layout: 'mobile' } })).filter((x) => typeof x === 'string').join(' | ');
   ok('composer: the picker offers only the chat', /Kat/.test(strs) && /Garm/.test(strs) && /Sam/.test(strs) && !/Sunny/.test(strs), strs.slice(0, 500));
+
+  // --- 1.0.9: outfits become a Clothes set, per-picture picks, one collapsed "What gets sent"
+  const OLD = { cardType: 'contact', id: 'c9', name: 'Vex', gender: 'female', species: '', emotions: {}, exampleChats: [], brains: [], brainsConditional: [],
+    cr: { img: { universalPrompt: 'girl, punk', outfits: [
+      { id: 'cr-o1', label: 'Jacket', prompt: 'leather jacket', uc: '', active: true },
+      { id: 'cr-o2', label: 'Boots', prompt: 'combat boots', uc: 'sandals', active: true },
+      { id: 'cr-o3', label: 'Dress', prompt: 'black dress', uc: '', active: false } ] } } };
+  L = await load({ storage: { characterListKey: [OLD], userListKey: [SAM], scenarioListKey: [] },
+    storyStorage: { chatSettingsKey: { char: OLD, user: SAM, intimacy: 'close', style: 'chat', responseLength: 'unspecified' } }, bridge: { json: '' } });
+  X = L.X;
+  const vex = X.charList()[0];
+  const os = X.crCardSets()(vex)[0];
+  ok('migrate: old outfits become one Outfit set marked as clothes', vex.cr.img.outfits === undefined && os && os.name === 'Outfit' && os.wear === true, vex.cr);
+  ok('migrate: the two that were on lead as one Worn version, then each outfit', os.variants.map((v) => v.name).join() === 'Worn,Jacket,Boots,Dress' && os.variants[0].prompt === 'leather jacket, combat boots' && os.variants[0].uc === 'sandals', os.variants);
+  ok('migrate: stored once, so the next load finds sets', JSON.stringify(await L.storage.get('characterListKey')).indexOf('outfits') < 0);
+  let cap = X.crAssembleCharacterPrompt()(vex, 'illustrate');
+  ok('migrate: the picture is unchanged', cap.visuals === 'girl, punk, leather jacket, combat boots' && cap.uc === 'sandals', cap);
+  cap = X.crAssembleCharacterPrompt()(vex, 'illustrate', { wears: 'bikini' });
+  ok('clothes: a scene that says what they wear leaves the Clothes set out', cap.visuals === 'girl, punk, bikini' && cap.uc === '', cap);
+  X.crIllus().cast = ['c9'];
+  X.crIllus().prompt = 'full body, night. Woman leans on wall.\n@Vex: standing';
+  X.crIllusPick()('c9', 'sOutfits', 'o3');
+  await X.crIllusGenerate()();
+  sent = L.rec.sent[L.rec.sent.length - 1];
+  ok('pick: this picture wears the version picked', sent && /black dress/.test(sent.characters[0].visuals) && !/leather jacket/.test(sent.characters[0].visuals), sent && sent.characters);
+  ok('pick: the chat keeps its own version', X.crSetActiveVariant()(X.crCardSets()(vex)[0]).id === 'oWorn');
+  X.crIllusPick()('c9', 'sOutfits', 'oWorn');
+  ok('pick: picking the chat\'s version clears the override', !X.crIllus().picks.c9, X.crIllus().picks);
+  strs = flat(X.CrIllusComposer()({ st: { layout: 'mobile' } })).filter((x) => typeof x === 'string').join(' | ');
+  ok('composer: no Location or separate What gets sent section; the sent text is folded away', strs.indexOf('Location') < 0 && strs.indexOf('Prompt: ') < 0 && /What gets sent/.test(strs) && /Vex  ·  Outfit/.test(strs), strs.slice(0, 700));
+  X.crIllus().showSent = true;
+  strs = flat(X.CrIllusComposer()({ st: { layout: 'mobile' } })).filter((x) => typeof x === 'string').join(' | ');
+  ok('composer: opened, it shows the location, the whole prompt in send order and the negative', /Location: no Scenario/.test(strs) && /Prompt: 1girl, solo, full body/.test(strs) && /Negative: /.test(strs), strs.slice(0, 900));
 
   console.log('\n' + pass + ' passing, ' + fail + ' failing');
   if (fail) process.exit(1);
