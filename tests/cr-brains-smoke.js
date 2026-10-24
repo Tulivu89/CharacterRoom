@@ -1,7 +1,7 @@
 // ============================================================================
 // cr-brains-smoke.js — brain sets and per-chat brain switches  [CR-SETS]
 //
-// Pins engine 1.0.5 (D-107) and 1.0.6 (D-108): a set sends its variant in use as one brain, Suppress takes a card,
+// Pins engine 1.0.5 (D-107), 1.0.6 (D-108) and 1.0.10 (D-119): a set sends its variant in use as one brain, Suppress takes a card,
 // conditional or set brain out of this story's context, the variant's image pair joins the
 // pictures, a Stage set replaces the Banner, and with no sets or switches the kernel receives
 // the card itself. AnotherRoom has no such feature, so parity cannot pin it; this file does.
@@ -108,7 +108,7 @@ async function load(env) {
         setTimeout, clearTimeout
     });
     const names = ['crSmartImport', 'crClassifyCardFile', 'crCardImportReceive', 'crBridge', 'charList', 'userList',
-        'scenarioList', 'crUiStore', 'importCharacter', 'importUser', 'importScenario', 'CrPairingPanel', 'CrGroupTab', 'CrGroupMembersRow', 'crGroupInit', 'CrPairRow', 'CrPressable', 'crBrainView', 'crPickVariant', 'crSetBrainOff', 'crBrainsFired', 'crAssembleCharacterPrompt', 'crSceneBasePrompt', 'crStageBackdropSlot', 'crSanitizeContactExtra', 'CrChatBrainsTab', 'crSetActive', 'crBrainsOff', 'chatSettings', 'crSetCondMode', 'crCondMode', 'crJsxModal', 'crPickFolderFor', 'crPickApply'];
+        'scenarioList', 'crUiStore', 'importCharacter', 'importUser', 'importScenario', 'CrPairingPanel', 'CrGroupTab', 'CrGroupMembersRow', 'crGroupInit', 'CrPairRow', 'CrPressable', 'crBrainView', 'crPickVariant', 'crSetBrainOff', 'crBrainsFired', 'crAssembleCharacterPrompt', 'crSceneBasePrompt', 'crStageBackdropSlot', 'crSanitizeContactExtra', 'CrChatBrainsTab', 'crSetActive', 'crBrainsOff', 'chatSettings', 'crSetCondMode', 'crCondMode', 'crJsxModal', 'crPickFolderFor', 'crPickApply', 'crSetResolve', 'crUnpinVariant', 'crEventSetChoices', 'crScheduleLinkSet', 'crScheduleDelete', 'crCardSets'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;return {${exp}};\n})()`, ctx, { filename: ENGINE });
     Object.assign(X, exported); X.rec = rec; X.HOOKS = HOOKS; X.history = historyStorage; X.story = storyStorage;
@@ -229,6 +229,46 @@ const flat = (n, out) => { out = out || []; if (n == null || typeof n !== 'objec
   X.crPickApply()('__new');
   await new Promise((res) => setTimeout(res, 0)); await new Promise((res) => setTimeout(res, 0));
   ok('folder: New folder from the picker opens the name sheet in its own modal', X.rec.modals.length === n0 + 1 && X.rec.modals[n0] !== X.rec.modals[n0 - 1], X.rec.modals);
+  // ---- 1.0.10: sets that choose themselves (D-119)
+  const mira = X.charList().find((c) => c.id === 'c-mira');
+  const port = X.scenarioList().find((c) => c.id === 's-port');
+  const outfit = () => X.crSetResolve()(X.crCardSets()(mira)[0], 'c-mira');
+  const place = () => X.crSetResolve()(X.crCardSets()(port)[0], 's-port');
+  await X.crUnpinVariant()('sOutfit1');
+  await X.crUnpinVariant()('sLoc0001');
+  await X.crSetBrainOff()('s-port', 's:sLoc0001', false);
+  ok('resolve: with nothing pinned or linked, the first version', outfit().v.id === 'vCasual1' && outfit().why === 'default', outfit());
+  mira.cr.sets[0].variants[1].intimacy = ['close'];
+  ok('resolve: a version marked for the chat\'s relationship level wins over the first', outfit().v.id === 'vFormal1' && outfit().why === 'relationship', outfit());
+  p = await sheet();
+  ok('resolve: and that is the one sent', p.indexOf('Outfit: Formal') >= 0 && p.indexOf('Outfit: Casual') < 0, p.slice(-300));
+  mira.schedule = { Daily: [{ id: 'e1', startTime: 0, endTime: 1439, text: 'At the cafe', requiredIntimacy: 'none' }] };
+  mira.cr.schedLinks = { e1: { sOutfit1: 'vCasual1', sLoc0001: 'vCafe001' } };
+  ok('resolve: the current schedule event beats the relationship', outfit().v.id === 'vCasual1' && outfit().why === 'schedule' && outfit().event === 'At the cafe', outfit());
+  ok('resolve: a Scenario\'s set follows the paired Contact\'s schedule', place().v.id === 'vCafe001' && place().why === 'schedule', place());
+  p = await sheet();
+  ok('resolve: the schedule\'s versions are what the build sends', p.indexOf('Outfit: Casual') >= 0 && p.indexOf('Location: Cafe') >= 0, p.slice(-300));
+  ok('resolve: the Stage backdrop follows too', X.crStageBackdropSlot()(port) === 'v-vCafe001');
+  mira.schedule.Daily[0].requiredIntimacy = 'romantic';
+  ok('resolve: an event held back by intimacy links nothing', outfit().why === 'relationship' && place().why === 'default', [outfit().why, place().why]);
+  mira.schedule.Daily[0].requiredIntimacy = 'none';
+  await X.crPickVariant()('sOutfit1', 'vFormal1');
+  ok('resolve: a pin on Chat > Brains beats the schedule', outfit().v.id === 'vFormal1' && outfit().why === 'pinned', outfit());
+  await X.crUnpinVariant()('sOutfit1');
+  ok('resolve: Auto unpins, in history storage so undo restores it', outfit().why === 'schedule' && JSON.stringify(await X.history.get('cr.setActive')).indexOf('sOutfit1') < 0);
+  let tabTxt = flat(X.CrChatBrainsTab()({ mobile: false })).filter((x) => typeof x === 'string').join(' | ');
+  ok('tab: says why, and offers Auto with what it would pick', tabTxt.indexOf('by schedule: At the cafe') >= 0 && tabTxt.indexOf('Auto: Casual') >= 0, tabTxt.slice(0, 600));
+  const sheetTxt = flat(X.crEventSetChoices()(mira, 'e1')).filter((x) => typeof x === 'string').join(' | ');
+  ok('event sheet: While this is on lists the Contact\'s and the paired Scenario\'s sets', sheetTxt.indexOf('Mira  ·  Outfit') >= 0 && sheetTxt.indexOf('Port  ·  Location') >= 0 && sheetTxt.indexOf('No change') >= 0, sheetTxt.slice(0, 400));
+  await X.crScheduleLinkSet()(mira, 'e1', 'sOutfit1', 'vFormal1');
+  const m2 = X.charList().find((c) => c.id === 'c-mira');
+  ok('event sheet: a pick is stored on the Contact, beside the schedule', m2.cr.schedLinks.e1.sOutfit1 === 'vFormal1' && m2.cr.schedLinks.e1.sLoc0001 === 'vCafe001' && m2.schedule.Daily[0].sOutfit1 === undefined, m2.cr.schedLinks);
+  await X.crScheduleLinkSet()(m2, 'e1', 'sLoc0001', '');
+  ok('event sheet: No change removes the link', !X.charList().find((c) => c.id === 'c-mira').cr.schedLinks.e1.sLoc0001);
+  await X.crScheduleDelete()(X.charList().find((c) => c.id === 'c-mira'), 'e1');
+  ok('event sheet: deleting the event drops its links', !(X.charList().find((c) => c.id === 'c-mira').cr.schedLinks), X.charList().find((c) => c.id === 'c-mira').cr.schedLinks);
+  const kept = X.crSanitizeContactExtra()({ sets: [{ id: 'sA', name: 'A', variants: [{ id: 'v1', name: 'x', content: '', intimacy: ['close', 'bogus'] }] }], schedLinks: { e9: { sA: 'v1', 'bad id!': 'v1' } } });
+  ok('data: levels and links survive the sanitizer, junk does not', JSON.stringify(kept.sets[0].variants[0].intimacy) === '["close"]' && JSON.stringify(kept.schedLinks) === '{"e9":{"sA":"v1"}}', kept);
   console.log(pass + ' passing, ' + fail + ' failing');
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });
