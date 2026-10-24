@@ -1,6 +1,6 @@
 # CharacterRoom — Plan & Inventory (CR-PLAN)
 
-**Doc version** 0.81 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
+**Doc version** 0.82 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
 the last three are the random-name tables · **Target artifacts** `characterroom-vX.naiscript`
 (engine, LF) and the **shared bridge** — CE's bridge extended to serve both engines (D-15)
 
@@ -51,6 +51,7 @@ the last three are the random-name tables · **Target artifacts** `characterroom
 | D-25 | **CR 0.0.x ships AnotherRoom's UI under CR names** with the kernel inside. The JSX shell replaces those doors in P4. | Every build is importable and complete; nothing waits on the shell to be usable. |
 | D-21 | **Editor portraits are painted by the bridge** (was O-10). | The mechanism exists live today in CE's STORYIMG path: the engine creates a **node widget** holding a 1px transparent **sentinel text** (`ce-storyimg:<id>`); the bridge finds it with a TreeWalker, re-scans on a debounced MutationObserver, climbs a bounded number of ancestors to the widget's own box, and paints there. CR's avatar uses the same channel with the older CharChat sentinel `ce-chatava:` — the bridge still parses `id\|emotion` and still has `_ccavFindSentinels`, `_ccavContainerFor` and `_ccavSettings`; only `_ccavPaintOne` is gone and is rebuilt on `_ceStoryImgRender`'s pattern. No image bytes cross into the worker. §6.8. |
 | D-22 | **Display options: account default, per-Contact override** (was O-11). | Stored on the Contact card as `display?`; resolved by one function (§6.8). |
+| D-118 | **In Home, a speaker is told only their own room and who is in it with them; who replies stays the author's choice.** The Scenario's Location set resolves per speaker to that speaker's room, plus one line naming those present (the User counted where the camera put them). Member buttons and native Send are unchanged. **Design only** (§6.12, O-19); lands with step 2 and a parity fixture. | Author's call, closing 0.81's open question. Per-speaker resolution fits the group path, which already builds each speaker's context on its own; the paired Contact on native Send gets the same treatment, so nobody "knows" a room they are not in. |
 | D-117 | **Home's rooms take any shape, positions are fractions, and the camera follows the paired Contact.** A room's Home picture keeps its own ratio (the bridge's `--ce-img-ar`); anchors are x of width and y of height, a figure's size a fraction of the room's width, placed by tap-tap, mouse drag over a grid, or X/Y/Scale sliders. Home shows the paired Contact's room; the author can look at another room or drop in, which pins the chat's Location set to that room until **Follow**. **Design only** (§6.12, O-19). | Author's call, answering 0.80's question. Fractions of each axis make the square requirement unnecessary: nothing is measured, the box simply carries the picture's ratio. The camera rule keeps the chat's Location honest: by default it is where the Contact is, and it becomes where the User is only when the author drops in. |
 | D-116 | **Plan-only changes go straight to `main`;** engine and test changes still go through a branch and a PR. The plan lives only in the repo; the project copy under `claude/` is a convenience snapshot. | Author's call. Closes D-105's worry about the plan being out of step between accounts: whoever works on the plan pushes it to the one place. |
 | D-115 | **Illustrate, streamlined.** Compose has three sections: Scene, Who is in it, Generate. Who is in it lists each picked person's sets that have more than one version, so this picture can wear another outfit (or any set's version) without changing the chat's (`crIllus.picks`, in memory; picking the chat's own version clears it). The separate Location and What gets sent sections and the chunk lines under Generate are folded into one **What gets sent** toggle beside Generate, closed by default: the location line, the whole prompt in send order (start chunks, scene, after-scene chunks, location and card base, end chunks), each caption with its negative, and the full negative. **Built in engine 1.0.9.** | Author: the menu had two blocks of prompt text and no way to swap an outfit for one picture. The prompt it shows is the one the bridge assembles, so what you read is what is sent. |
@@ -1217,9 +1218,15 @@ reads — the harness runs, and a fixture pins one schedule-chosen and one relat
 | Activities, anchors, scale, schedule links, relationship rules | the Contact's `cr` bag | travel with the card |
 | Pins, needs, the away log, last-seen time | the story (`storyStorage`; pins in `historyStorage` as now) | a chat's own state, like the version in use |
 
-**Open**: what a drop-in means for who answers — in a group, whether members in the dropped-into room should be the
-ones offered to reply (D-85's member buttons), and whether the paired Contact, left in another room, is told the User
-is elsewhere. Real or story clock
+**Each speaker knows only their own room** (D-118). When a reply is built, the Scenario's Location set resolves to
+**the speaker's** room, not the chat's, and one line names who else is in it ("In the kitchen with you: Sam, Kat") —
+the User counted where the camera put them (with the Contact, or where they dropped in). A Contact in another room is
+therefore told neither the User's room nor who is there. **Who replies stays the author's choice**: the member
+buttons (D-85) and native Send work as now, whoever is in whichever room. Built with step 2: it changes what the
+kernel is fed per speaker (the group path already assembles each speaker's context separately, `crGroupAssemble`),
+so it lands with a parity fixture.
+
+**Open**: real or story clock
 for Home (D-08; leaning: the chat's own clock, so one setting rules both). What a catch-up costs with a group. Whether
 the first open of a story may run one catch-up unasked (D-40 says no unattended generation; the replay is free, the
 narration is a press).
@@ -1388,6 +1395,8 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ---
 
 ## 10. Changelog
+
+- **0.82** — plan only: D-118 (each speaker knows only their room and who is in it; the author picks who replies).
 
 - **0.81** — plan only: D-117 (Home rooms any shape, fractional positions with sliders, camera follows the paired Contact; look or drop in).
 
