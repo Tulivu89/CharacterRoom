@@ -1,6 +1,6 @@
 # CharacterRoom — Plan & Inventory (CR-PLAN)
 
-**Doc version** 0.79 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
+**Doc version** 0.80 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
 the last three are the random-name tables · **Target artifacts** `characterroom-vX.naiscript`
 (engine, LF) and the **shared bridge** — CE's bridge extended to serve both engines (D-15)
 
@@ -156,7 +156,7 @@ the last three are the random-name tables · **Target artifacts** `characterroom
 | ~~O-12~~ | Closed by D-23. How CR's side generations assemble context (U-02 finding) | (a) mimic AR: let the chat-context hook rewrite them, side effects included; (b) build the side-gen prompt through the kernel explicitly — character sheet, user, scenario, brains — and call with `suppressScriptHooks: 'self'`, the way CE's own story-context gens do | (b). It keeps what makes AR's side gens work (the AetherRoom sheet) and drops what is accidental (plan aging, `<think>` on the primer, a second style tag). Output should be compared once against (a) before the switch. |
 | ~~O-17~~ | **Closed by D-106.** **How a long card list is organised** (author's item 2, 2026-10-24). | (a) search box, sort (name, last paired, newest) and a row/grid toggle — no new data; (b) group by the `tags` a card already carries, one folding `CrHeading` (D-74) per tag; (c) folders the author names, one per card, kept account-level in a `cr.cardFolders` map rather than on the card, so an export does not carry the owner's filing; (d) a pinned row on top | (a) always, plus (c). **Not (b)**: `tags` is a prompt field — the kernel writes it into the sheet (`Tags:`, fixture `tags-merge`) — so filing by it would mean editing what the model reads to tidy a list. Asked of the author. **Widened 0.74**: the Group tab's member picker is the same long list, so one list component answers both. |
 | ~~O-18~~ | **Closed by D-107.** **A brain set: several variants, exactly one active** (author's item 3, 2026-10-24) — Scenario locations, outfits. What a variant is, where the choice lives, how it reaches context and images. | A variant = name, brain text, an image prompt pair, optionally its own image slot. **Owner**: any card (a Scenario for places, a Contact or User for outfits). **Choice**: (a) `historyStorage` per story, so undo rewinds a move; (b) `storyStorage`. **Context**: the K-CONTEXT adapter hands the kernel the active variant as one more brain of its owner, so SECTION K is untouched and parity holds for every chat with no sets. **Images**: the active pair joins the prompt the way the Scenario's base pair (D-46) and outfits do; a variant slot `<cardId>_em_<slot>` (bridge-safe name) replaces the Stage backdrop/Banner for a place, the portrait source for an outfit — no bridge change, the surface painter already takes `id\|slot`. **Existing outfits** (`CrImgCard.outfits`, image-only, several on at once): (i) keep them as layers beside sets; (ii) fold them into a set | (a), (i). A move is a story event, so undo should take it back; outfits stay because layering (coat over dress) is what they already do well, and folding them in is a migration (D-20). Model-driven switching waits: a location line written into the story is D-63's hazard. |
-| O-19 | **Tamagotchi mode** (author's item 4, concept, 2026-10-24). | §6.12. | Concept only; sequenced after O-18, whose places are its rooms. |
+| O-19 | **Tamagotchi mode** (author's item 4, concept, 2026-10-24). | §6.12. | Mapped at 0.80 as **Home**, four steps; step 1 (sets chosen by schedule and relationship) stands alone and comes first. |
 | ~~O-20~~ | **Closed by D-107.** **A Brains tab on Chat: every brain in play, live state, switch it here** (author's idea, 2026-10-24). One list for the paired Contact, the User, the Scenario and each group member — card brains, conditional brains, floaty brains, O-18's sets — showing which are in the next build and letting the author suppress or restore each for this chat. | **State shown**: plain brains are on unless suppressed; a conditional brain's state is whether it fired, so the list shows the last build's result (recorded in `onBeforeContextBuild`) beside its keys and intimacy gate rather than predicting it; a set shows as one row with its variant picker, which is where O-18 switches. **Where suppression lives**: (a) per story, `storyStorage` `cr.brainsOff` {cardId: names}; (b) `historyStorage`, so undo restores. **How it applies**: the K-CONTEXT adapter filters the owner's brains before the kernel sees them, exactly as O-18 adds a variant — SECTION K untouched, parity unaffected for any chat with nothing suppressed; a fixture pins a suppressed brain's absence. **Floaty brains** already have on/off; the tab writes their existing state rather than a second one. | (a): suppressing is a setting for this chat, not a story event. Build O-18 and O-20 as one patch series — the tab is O-18's switch. A suppressed brain is matched by name within its card, so a renamed brain comes back on; that is the safe failure. |
 
 ---
@@ -1131,27 +1131,86 @@ precedent for a full-window jsx scene whose figures the bridge paints with no br
 precedent for moving one with inline transforms. O-18's location variants are the rooms, each with its own backdrop
 slot — an aerial prompt per place (from above, isometric room).
 
-**Proposal (engine 1.0.9 session, awaiting the author).** Not a mode but a **Home** surface beside Stage and Posts; the
-chat goes on as before and Home reads and writes the same state, so dropping in for a chat never leaves anything.
-- **Rooms are the Scenario's Location set, outfits the Contact's Clothes set** (D-107, D-114). Moving rooms or changing
-  clothes in Home is picking a variant, so the chat's brains and every picture already follow. Each room variant's
-  picture is its aerial backdrop; spots are zones tapped onto it, kept on the variant as percentages.
-- **The figure** is the Contact's emotion portrait at its spot, painted like the Stage (§6.8b), group members beside it.
-  Where they stand comes from the schedule (D-14) when one says, else from the last thing done.
-- **Needs** are Games resources (D-91) the author defines per Contact (meters, decay per hour, a floor that changes the
-  emotion shown). Decay is arithmetic on elapsed time at open — nothing runs while away.
-- **Actions** (feed, rest, play, talk, change clothes, go to a room) are buttons with author-set effects on needs; no
-  generation. An optional one-line reaction uses the Games React path (one press, one generation, never the story).
-- **While you were away**: on open, the gap replays deterministically (seeded) into a short list of events — room moves,
-  needs crossing a floor, scheduled activities; **Catch up** narrates them in one generation, in the Contact's voice,
-  as a log on Home. Send to chat drops one entry into the story; Snapshot pictures the moment through Illustrate.
-- **Into the chat**, optionally, one system line of state ("Mira is tired and in the kitchen"), the D-93 dice-line
+**The map (CR-PLAN 0.80, after the author's second pass).** Not a mode but a **Home** surface beside Stage and Posts.
+The chat goes on as before and Home reads and writes the same state, so dropping in for a chat never leaves
+anything behind. It is built in four steps, and the first is worth having with no Home at all.
+
+#### Step 1 — sets that choose themselves (useful to the chat on its own)
+
+A set's version in use stops being only a manual pick. It is resolved, in this order:
+
+1. **Pinned** — the author picked it on Chat > Brains (today's behaviour, `cr.setActive`). Shown as *pinned* with an
+   **Auto** button that unpins. A pick made from Home (step 3) pins only **until the schedule moves on**.
+2. **By schedule** — the Contact's current schedule event names a version: *Cooking dinner* → Location **Kitchen**,
+   Outfit **Apron**. Read from the same matcher as Current Events and the status line (`crStatusRead`), so the three
+   cannot disagree, on the chat clock (D-08), so story-clock undo rewinds it too.
+3. **By relationship** — a version lists the relationship levels it is for (romantic / close / acquaintance /
+   stranger, `INTIMACY_LIST`): Outfit **Lingerie** at romantic, **Uniform** at stranger.
+4. **Default** — the set's first version.
+
+Chat > Brains says which rule chose each set ("by schedule: Cooking dinner"). **Where the links live**: on the card's
+`cr` bag (`cr.scheduleLinks`, keyed by schedule event id; `intimacy` on the variant), never inside AnotherRoom's
+`ScheduleEvent`, so the schedule itself stays AR's for parity and for export to AR. A link names a set and version by
+id; a link to a Scenario's set applies only while that Scenario is paired. The schedule editor's event sheet gains
+**While this is on** (one choice per set); the set editor's version row gains **Use at** (relationship levels).
+**Parity**: the kernel is untouched, but `crBrainView` feeds it the resolved version, so this is state the kernel
+reads — the harness runs, and a fixture pins one schedule-chosen and one relationship-chosen version.
+
+#### Step 2 — Home's room and its figures
+
+- **A room is a version of the Scenario's Location set** with its own **square** Home picture (slot `h-<variantId>`,
+  separate from the variant's Stage picture, which stays wide). Square means one size number places anything.
+- **Coordinates are fractions of the room's side** (0–1, x and y), so a figure lands in the same spot at any window
+  size; nothing is measured, which matters because the script cannot measure the page (no layout in the worker).
+- **Activities belong to a Contact** (a User too, later): *Sleeping*, *Cooking*, *Reading*… each one a picture slot
+  (`a-<id>`), a room, an anchor point (x, y — the picture's **centre** sits there), a **scale** (the picture's width
+  as a fraction of the room's), and an optional generation prompt. A schedule event links to an activity (step 1's
+  link gains `activity`); the activity's room then also picks the Location set, so one link does both.
+  With no event on, the Contact's **Idle** activity for the room they are in is used.
+- **Arrange mode** lays a grid over the room (a fixed 20×20, drawn only while arranging). Placing a figure: tap it,
+  then tap a cell — this works on a phone, where a finger drag cannot cross elements. With a mouse, press on the
+  figure and the cells it passes update it live (`onPointerDown` / `onPointerEnter` / `onPointerUp`, jsx-typings
+  L101–107; a touch keeps its pointer captured, hence tap-tap there). Scale is a slider beside it.
+- **Painting** follows the Stage's rules (§6.8b): every picture is its own `data-ce-ar-host`, so the bridge reports
+  each one's ratio and the figure keeps its shape; no bridge change is expected.
+- **Activity pictures**: uploads keep transparency (the bridge stores a PNG with alpha as is). A generated one has a
+  background; NovelAI's background-removal tool would fix that — **unknown** whether the API offers it and at what
+  cost (U-new, a bridge probe). Until then a plain or simple background is the honest default, and one press makes
+  one picture (D-40).
+- **Who is shown**: the paired Contact and the group's members, each in the room their activity puts them in. Home
+  shows one room at a time with a strip of the rooms and who is in each.
+
+#### Step 3 — needs and actions
+
+- **Needs** are Games resources (D-91) the author defines per Contact: a meter, a decay per hour, and floors that
+  change the emotion portrait used for their figure (hungry, tired). Decay is arithmetic on elapsed time when the
+  story opens or the clock moves — nothing runs while away.
+- **Actions** (feed, rest, play, talk, change clothes, go to a room) are buttons with author-set effects on needs and,
+  optionally, a set version or activity they switch to (pinned until the schedule moves on). No generation; an
+  optional one-line reaction uses the Games React path (one press, one generation, never the story).
+
+#### Step 4 — while you were away
+
+- On open, the gap replays deterministically (seeded, D-96's generator) into a short list: schedule moves between
+  rooms, needs crossing floors, activities done. **Catch up** narrates the list in one generation in the Contact's
+  voice, as a log on Home, members folded into the same call. **Send to chat** drops one entry into the story;
+  **Snapshot** pictures the moment through Illustrate with the current room, outfits and poses.
+- Optionally, one system line of state into the chat ("Mira is tired and in the kitchen"), the D-93 dice-line
   precedent — off by default.
 
-**Open before a design**: real clock or story clock for this mode (D-08; leaning real); how a spot is defined (named
-zones set by tapping the backdrop, stored as percentages); whether needs reach chat context at all (D-91 said no for
-dice; a one-line system note like D-93's dice line is the alternative); what a catch-up costs on the main script's
-allowance with a group; whether the first open of a story may run one catch-up unasked.
+#### Where things are kept
+
+| What | Where | Why |
+|---|---|---|
+| Rooms, their Home pictures | the Scenario (sets, `h-` slots) | travel with the Scenario's export |
+| Activities, anchors, scale, schedule links, relationship rules | the Contact's `cr` bag | travel with the card |
+| Pins, needs, the away log, last-seen time | the story (`storyStorage`; pins in `historyStorage` as now) | a chat's own state, like the version in use |
+
+**Open**: whether the User has a place in the house — if so, the chat's Location could follow the room the User is in,
+and a Contact in another room is "elsewhere"; if not, the chat's Location follows the paired Contact. Real or story clock
+for Home (D-08; leaning: the chat's own clock, so one setting rules both). What a catch-up costs with a group. Whether
+the first open of a story may run one catch-up unasked (D-40 says no unattended generation; the replay is free, the
+narration is a press).
 
 ## 7. CE reuse map
 
@@ -1317,6 +1376,8 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ---
 
 ## 10. Changelog
+
+- **0.80** — plan only: §6.12 Home mapped in four steps (sets chosen by schedule and relationship; square rooms with fractional anchors, activities, tap-tap and mouse placement; needs and actions; catch-up), with where each piece is kept. O-19 stays open.
 
 - **0.79** — engine 1.0.9: D-114 (outfits become Clothes sets), D-115 (Illustrate streamlined; per-picture set swap), D-116 (plan changes go straight to main). Tamagotchi proposal added to §6.12. `cr-imgv5-smoke.js` 54.
 
