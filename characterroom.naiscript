@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.7
+version: 1.0.8
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.7. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.8. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -90,6 +90,8 @@ BRIDGE MESSAGES (channel "hypebot", envelope {type, sid, payload})
   The bridge also writes --ce-img-ar onto the nearest [data-ce-ar-host] when it paints.
   GENERATE_IMAGE from CR sets settings.qualityLast and settings.siteParams, and a characters[] entry may carry
   center {x, y}; bridge 3.0.37 honours them, and CE (which sends none) is unchanged. [CR-IMGV5]
+  settings.qualityStart / qualityMid carry chunks placed at the start / after the scene; a bridge that does not
+  ack imgSpots (before 3.0.38) gets them folded into the prompt instead (crImgSend).
 
 HELPER MESSAGES (channel "cr-persona-helper", flat {type, sid, ...})
   PH_HELLO PH_PING PH_WAKE PH_PONG PH_RUN PH_DONE. Change both scripts or neither.
@@ -5708,7 +5710,7 @@ async function crGenerateVariantImage(card: CrAnyCard, kind: CrCardKind, set: Cr
       catch (e){}
       return;
     }
-    await crBridgeSend("GENERATE_IMAGE", {
+    await crImgSend({
       kind: "charSlot", charId: card.id, slot: slot, uuid: uuid,
       prompt: [what, "no humans, scenery, wide shot"].join(", "),
       extraBaseVisuals: (scene.basePrompt || "").trim(),
@@ -5717,7 +5719,8 @@ async function crGenerateVariantImage(card: CrAnyCard, kind: CrCardKind, set: Cr
       settings: {
         model: crImgSettings.model, width: crImgSettings.width, height: crImgSettings.height,
         scale: crImgSettings.scale, steps: crImgSettings.steps, seed: crImgSettings.seed,
-        quality: compiled.quality, negative: compiled.negative, qualityLast: true, siteParams: true
+        quality: compiled.quality, negative: compiled.negative, qualityLast: true, siteParams: true,
+      qualityStart: compiled.start, qualityMid: compiled.mid
       }
     });
   }
@@ -5730,7 +5733,7 @@ async function crGenerateVariantImage(card: CrAnyCard, kind: CrCardKind, set: Cr
       return;
     }
     const base = crAssembleBasePrompt(cast, "avatar");
-    await crBridgeSend("GENERATE_IMAGE", {
+    await crImgSend({
       kind: "charSlot", charId: card.id, slot: slot, uuid: uuid,
       prompt: crCountTags([crKind(cast)]).concat(["solo", "full body, standing, simple background"]).join(", "),
       extraBaseVisuals: base.base, extraBaseUC: base.uc,
@@ -5738,7 +5741,8 @@ async function crGenerateVariantImage(card: CrAnyCard, kind: CrCardKind, set: Cr
       settings: {
         model: crImgSettings.model, width: crImgSettings.width, height: crImgSettings.height,
         scale: crImgSettings.scale, steps: crImgSettings.steps, seed: crImgSettings.seed,
-        quality: compiled.quality, negative: compiled.negative, qualityLast: true, siteParams: true
+        quality: compiled.quality, negative: compiled.negative, qualityLast: true, siteParams: true,
+      qualityStart: compiled.start, qualityMid: compiled.mid
       }
     });
   }
@@ -11707,6 +11711,12 @@ function CrPromptPair(props: {
 
 let crChunkShowAll = false;
 
+function crChunkOrderText(c: { start: string; mid: string; quality: string }) : string
+{
+  return [c.start ? "[" + c.start + "]" : "", "scene", c.mid ? "[" + c.mid + "]" : "", "location and card base",
+          c.quality ? "[" + c.quality + "]" : ""].filter(Boolean).join(" \u2192 ");
+}
+
 function crImgModelLabel(id: string) : string
 {
   const m = CR_IMG_MODELS.find((x) => x.id === id);
@@ -11766,9 +11776,19 @@ function CrImgFieldsPanel() : any
           crSaveImgFields().catch(() => {});
         }
       }),
+      h(CrChoice, {
+        label: "Position",
+        options: CR_CHUNK_SPOTS,
+        active: crChunkSpot(f),
+        onPick: (id: string) => {
+          if (id === "start" || id === "mid"){ crImgFields[idx].spot = id; }
+          else { delete crImgFields[idx].spot; }
+          crSaveImgFields().catch(() => {});
+        }
+      }),
       h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, marginTop: CR_S_2 } },
         h(CrTextArea, {
-          value: f.basePrompt, placeholder: "added to the end of the prompt",
+          value: f.basePrompt, placeholder: "added to the prompt at its position",
           onSet: (v: string) => { crImgFields[idx].basePrompt = v.slice(0, 1200); crSaveImgFields().catch(() => {}); }
         }),
         h(CrTextArea, {
@@ -11798,7 +11818,7 @@ function CrImgFieldsPanel() : any
       })
     ),
     h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" } },
-      h("div", null, "Prompt end: " + (compiled.quality || "(nothing active)")),
+      h("div", null, "Order sent: " + crChunkOrderText(compiled)),
       h("div", { style: { marginTop: CR_S_1 } }, "Negative: " + (compiled.negative || "(nothing active)"))
     )
   );
@@ -12213,6 +12233,7 @@ async function crReportBuild() : Promise<void>
       + "   gutter markers refused: " + (crCcavIndentFailed ? "yes" : "no")
       + "   wrap clears refused: " + (crCcavClearFailed ? "yes" : "no")
       + "   bridge clears portraits: " + (crBridge.bridgeCcavClear ? "yes" : "no")
+      + "   bridge chunk spots: " + (crBridge.bridgeImgSpots ? "yes" : "no")
       + "   shaped bubbles refused: " + (crBubbleShapeRefused ? "yes" : "no"));
     out.push("  last emit: " + crReportAgo(crCcavLast.at)
       + (crCcavLast.reason ? "  STOPPED — " + crCcavLast.reason : "  ran"));
@@ -12598,6 +12619,7 @@ type CrImgField = {
   weight: number;
   active: boolean;
   models?: string[];
+  spot?: string;       // "start" | "mid" (after the scene); missing = the end
 };
 
 const CR_IMG_SETTINGS_DEFAULT: CrImgSettings = {
@@ -12619,6 +12641,19 @@ const CR_CHUNK_SCOPES: { id: string; label: string; models: string[] }[] = [
   { id: "v45f", label: "V4.5 Full",    models: CR_M_V45_FULL },
   { id: "v45c", label: "V4.5 Curated", models: CR_M_V45_CURATED }
 ];
+
+// Where a chunk's prompt text sits in the base caption: Start, after the scene (before the location and card
+// base), or the End. V4.5 weighs earlier tags more, so the author places them.
+const CR_CHUNK_SPOTS: { id: string; label: string }[] = [
+  { id: "start", label: "Start" },
+  { id: "mid",   label: "After scene" },
+  { id: "end",   label: "End" }
+];
+
+function crChunkSpot(f: CrImgField) : string
+{
+  return (f.spot === "start" || f.spot === "mid") ? f.spot : "end";
+}
 
 const CR_UC_HEAVY = "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page";
 const CR_UC_HUMAN = CR_UC_HEAVY + ", @_@, mismatched pupils, glowing eyes, bad anatomy";
@@ -12700,6 +12735,7 @@ function crImgFieldsAddStandard(list: CrImgField[], cap?: number) : CrImgField[]
     const copy: CrImgField = { id: f.id, label: f.label, basePrompt: f.basePrompt, uc: f.uc,
                                weight: f.weight, active: f.active };
     if (f.models){ copy.models = f.models.slice(); }
+    if (f.spot){ copy.spot = f.spot; }
     if (f.id === CR_IMG_FIELD_LEGACY_BASE.id &&
         f.basePrompt.trim() === CR_IMG_FIELD_LEGACY_BASE.basePrompt &&
         f.uc.trim() === CR_IMG_FIELD_LEGACY_BASE.uc){
@@ -12787,6 +12823,9 @@ function crSanitizeImgFields(v: any) : CrImgField[]
       : [];
     if (models.length > 0){
       f.models = models;
+    }
+    if (raw.spot === "start" || raw.spot === "mid"){
+      f.spot = raw.spot;
     }
     out.push(f);
   }
@@ -12898,9 +12937,11 @@ async function crImgAddStandard() : Promise<void>
 
 // [CR-IMGV5] Only the chunks for this model. A space before a closing "::" keeps a chunk that ends in a digit
 // ("year 2026") from reading as a new weight. A chunk that already holds "::" belongs at weight 1.
-function crCompileImgFields(model?: string) : { quality: string; negative: string }
+function crCompileImgFields(model?: string) : { start: string; mid: string; quality: string; negative: string }
 {
   const target = model || crImgSettings.model;
+  const startParts: string[] = [];
+  const midParts: string[] = [];
   const qualityParts: string[] = [];
   const negativeParts: string[] = [];
   for (let i = 0; i < crImgFields.length; i++){
@@ -12912,13 +12953,15 @@ function crCompileImgFields(model?: string) : { quality: string; negative: strin
     const bp = (f.basePrompt || "").trim();
     const uc = (f.uc || "").trim();
     if (bp){
-      qualityParts.push(w !== 1 ? (w + "::" + bp + " ::") : bp);
+      const spot = crChunkSpot(f);
+      (spot === "start" ? startParts : spot === "mid" ? midParts : qualityParts)
+        .push(w !== 1 ? (w + "::" + bp + " ::") : bp);
     }
     if (uc){
       negativeParts.push(w !== 1 ? (w + "::" + uc + " ::") : uc);
     }
   }
-  return { quality: qualityParts.join(", "), negative: negativeParts.join(", ") };
+  return { start: startParts.join(", "), mid: midParts.join(", "), quality: qualityParts.join(", "), negative: negativeParts.join(", ") };
 }
 
 // [CR-IMGV5] Built-in emotion tags, used until the account or the card says otherwise. Each carries its own gaze.
@@ -13132,7 +13175,7 @@ async function crGenerateSlot(char: CrCastCard, slot: string) : Promise<void>
   const card: CrImgCard = (char.cr && char.cr.img) ? char.cr.img : {};
   const seed = (card.avatarSeed && card.avatarSeed > 0) ? card.avatarSeed : crImgSettings.seed;
   const uuid = "cr-" + char.id.slice(0, 8) + "-" + slot + "-" + Date.now();
-  await crBridgeSend("GENERATE_IMAGE", {
+  await crImgSend({
     kind: "charSlot",
     charId: char.id,
     slot: slot,
@@ -13151,7 +13194,8 @@ async function crGenerateSlot(char: CrCastCard, slot: string) : Promise<void>
       steps: crImgSettings.steps,
       seed: seed,
       quality: compiled.quality,
-      negative: compiled.negative, qualityLast: true, siteParams: true
+      negative: compiled.negative, qualityLast: true, siteParams: true,
+      qualityStart: compiled.start, qualityMid: compiled.mid
     }
   });
   crGenReqNote(slot, char.id, "", {
@@ -13185,7 +13229,7 @@ async function crGenerateBanner(scenario: Scenario) : Promise<void>
   const compiled = crCompileImgFields();
   const seed = (card.bannerSeed && card.bannerSeed > 0) ? card.bannerSeed : crImgSettings.seed;
   const uuid = "cr-" + scenario.id.slice(0, 8) + "-Banner-" + Date.now();
-  await crBridgeSend("GENERATE_IMAGE", {
+  await crImgSend({
     kind: "charSlot",
     charId: scenario.id,
     slot: CR_SLOT_BANNER,
@@ -13202,7 +13246,8 @@ async function crGenerateBanner(scenario: Scenario) : Promise<void>
       steps: crImgSettings.steps,
       seed: seed,
       quality: compiled.quality,
-      negative: compiled.negative, qualityLast: true, siteParams: true
+      negative: compiled.negative, qualityLast: true, siteParams: true,
+      qualityStart: compiled.start, qualityMid: compiled.mid
     }
   });
   try{ await api.v1.ui.toast("Generating the banner…", { type: "info", autoClose: 2500 }); }
@@ -13270,7 +13315,7 @@ const CR_ARCH_FORMAT = [
   "Two or more: leave posture and expression out of the tags, and give each person theirs in their own sentence, in tag words.",
   "Rating, always the last tag: rating:general for ordinary moments, rating:sensitive for suggestive ones, rating:questionable or rating:explicit for sexual ones.",
   "Then, on new lines, one line for each listed person who can be seen:",
-  "@Name: that person's posture, gaze, expression, touch tags and state, as tags",
+  "@Name: that person's posture, gaze, expression, touch tags and state, as tags. Write Name exactly as the People list gives it, never the handle.",
   "When two or more people are visible, put (left), (center) or (right) after the name.",
   "Only if the text says someone's clothes differ from usual right now (changed clothes, swimsuit, towel, half-dressed, nude), add a line @Name wears: everything visible they have on, as tags.",
   "",
@@ -13405,6 +13450,29 @@ function crDetectCast(text: string) : CrCastCard[]
   return found;
 }
 
+// [CR-IMGV5] The people an image can show: the chat's Contact, its group members and the User, not every card.
+// Empty when no Contact is paired.
+function crChatCast() : CrCastCard[]
+{
+  const out: CrCastCard[] = [];
+  const contact = crLiveContact();
+  if (!contact){
+    return out;
+  }
+  out.push(contact);
+  const members = crGroupMembers();
+  for (let i = 0; i < members.length; i++){
+    if (!out.some((c) => c.id === members[i].id)){
+      out.push(members[i]);
+    }
+  }
+  const user = crLiveUser();
+  if (user && !out.some((c) => c.id === user.id)){
+    out.push(user);
+  }
+  return out;
+}
+
 type CrScanResult = {
   prompt: string;
   cast: CrCastCard[];
@@ -13419,7 +13487,8 @@ async function crArchitectScene(sections?: number) : Promise<CrScanResult | null
     catch (e){}
     return null;
   }
-  const cast = crDetectCast(storyText);
+  const chat = crChatCast();
+  const cast = chat.length > 0 ? chat : crDetectCast(storyText);
 
   try{
     const messages: APIMessage[] = [
@@ -13540,9 +13609,21 @@ function crCastLines(cast: CrCastCard[], senderId?: string) : string
     crHandle(c) + "." + (senderId && c.id === senderId ? " Took the photo." : "")).join("\n");
 }
 
-function crSceneMatchCard(who: string, cast: CrCastCard[]) : CrCastCard | undefined
+function crSceneKey(s: string) : string
 {
-  const w = who.trim().toLowerCase().replace(/^the\s+/, "");
+  return String(s || "").trim().toLowerCase().replace(/^(the|a|an)\s+/, "").replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+}
+
+const CR_KIND_WORDS: Record<string, CrKind> = {
+  girl: "girl", woman: "girl", lady: "girl", female: "girl",
+  boy: "boy", man: "boy", guy: "boy", male: "boy"
+};
+
+// Name, alias, handle, first name; then, when the writer used a description instead (@wolf-man, @woman), the one
+// card whose species or kind fits. A fit shared by two cards prefers the one not yet matched, else stays unknown.
+function crSceneMatchCard(who: string, cast: CrCastCard[], taken?: string[]) : CrCastCard | undefined
+{
+  const w = crSceneKey(who);
   if (!w){
     return undefined;
   }
@@ -13550,15 +13631,33 @@ function crSceneMatchCard(who: string, cast: CrCastCard[]) : CrCastCard | undefi
     const c: any = cast[i];
     const names = [c.name, c.alias].filter((n) => n && String(n).trim());
     for (let j = 0; j < names.length; j++){
-      if (String(names[j]).trim().toLowerCase() === w){ return cast[i]; }
+      if (crSceneKey(String(names[j])) === w){ return cast[i]; }
     }
   }
   for (let i = 0; i < cast.length; i++){
-    if (crHandle(cast[i]) === w){ return cast[i]; }
+    if (crSceneKey(crHandle(cast[i])) === w){ return cast[i]; }
   }
   for (let i = 0; i < cast.length; i++){
-    const first = String(cast[i].name || "").trim().toLowerCase().split(/\s+/)[0];
-    if (first && first === w.split(/\s+/)[0]){ return cast[i]; }
+    const first = crSceneKey(String(cast[i].name || "")).split(" ")[0];
+    if (first && first === w.split(" ")[0]){ return cast[i]; }
+  }
+  const pick = (list: CrCastCard[]) : CrCastCard | undefined => {
+    if (list.length === 1){ return list[0]; }
+    const free = list.filter((c) => !(taken || []).some((id) => id === c.id));
+    return free.length === 1 ? free[0] : undefined;
+  };
+  const words = w.split(" ");
+  const bySpecies = cast.filter((c) => {
+    const sp = crSceneKey(String(c.species || ""));
+    return !!sp && sp !== "human" && (" " + w + " ").indexOf(" " + sp + " ") >= 0;
+  });
+  const sp = pick(bySpecies);
+  if (sp){
+    return sp;
+  }
+  const kind = CR_KIND_WORDS[words[words.length - 1]];
+  if (kind){
+    return pick(cast.filter((c) => crKind(c) === kind));
   }
   return undefined;
 }
@@ -13584,7 +13683,7 @@ function crParseScene(text: string, cast: CrCastCard[]) : CrSceneParsed
     }
     const m = line.match(at);
     if (m){
-      const card = crSceneMatchCard(m[1], cast);
+      const card = crSceneMatchCard(m[1], cast, out.people.map((p) => p.card.id));
       if (!card){
         out.unknown.push(m[1].trim());
         continue;
@@ -14007,10 +14106,11 @@ async function crIllusEnhance() : Promise<void>
   crTouch();
   try{
     const cast = crIllusCastChars();
-    const named = crDetectCast(crIllus.prompt);
-    for (let i = 0; i < named.length; i++){
-      if (!cast.some((c) => c.id === named[i].id)){
-        cast.push(named[i]);
+    const chat = crChatCast();
+    const more = chat.length > 0 ? chat : crDetectCast(crIllus.prompt);
+    for (let i = 0; i < more.length; i++){
+      if (!cast.some((c) => c.id === more[i].id)){
+        cast.push(more[i]);
       }
     }
     const result = await crEnhanceScene(crIllus.prompt, cast);
@@ -14067,7 +14167,7 @@ async function crIllusGenerate() : Promise<void>
     }
     baseUCBits.push.apply(baseUCBits, built.extraUC);
     const uuid = "cr-illus-" + Date.now();
-    await crBridgeSend("GENERATE_IMAGE", {
+    await crImgSend({
       uuid: uuid,
       prompt: built.prompt,
       extraBaseVisuals: baseBits.join(", "),
@@ -14081,7 +14181,8 @@ async function crIllusGenerate() : Promise<void>
         steps: crImgSettings.steps,
         seed: crImgSettings.seed,
         quality: compiled.quality,
-        negative: compiled.negative, qualityLast: true, siteParams: true
+        negative: compiled.negative, qualityLast: true, siteParams: true,
+      qualityStart: compiled.start, qualityMid: compiled.mid
       }
     });
     crIllus.lastUuid = uuid;
@@ -14107,6 +14208,7 @@ function CrIllusComposer(props: { st: CrUiState }) : any
   const scene = crSceneBasePrompt();
   const liveScenario = crLiveScenario();
 
+  const chatCast = crChatCast();
   const castPick = (list: CrCastCard[]) => list.map((c) => {
     const on = crIllus.cast.indexOf(c.id) >= 0;
     const full = !on && crIllus.cast.length >= CR_ILLUS_MAX_CAST;
@@ -14180,8 +14282,12 @@ function CrIllusComposer(props: { st: CrUiState }) : any
 
     h(CrSection, {
       title: "Who is in it",
-      note: "Up to " + CR_ILLUS_MAX_CAST + ", Contacts or Users. Scan and Enhance pick the people in view; everyone picked is drawn. Each sends its own character prompt — Universal, Illustrator, worn outfits and sets; the Avatar pair is left out of scenes."
-    }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+      note: chatCast.length > 0
+        ? "Up to " + CR_ILLUS_MAX_CAST + " of this chat's people. Scan and Enhance pick the ones in view; everyone picked is drawn. Each sends its own character prompt — Universal, Illustrator, worn outfits and sets; the Avatar pair is left out of scenes."
+        : "No Contact is paired, so every card is offered. Pair one on the Chat screen to offer just its chat."
+    }, chatCast.length > 0 ? h("div", { style: { marginTop: CR_S_3, display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+      castPick(chatCast)
+    ) : h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
       charList.length === 0 && userList.length === 0
         ? h(CrEmpty, { text: "No cards yet." })
         : null,
@@ -14233,7 +14339,7 @@ function CrIllusComposer(props: { st: CrUiState }) : any
       h("div", {
         style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" }
       },
-        h("div", null, "Chunks: " + (compiled.quality || "(none active)")),
+        h("div", null, "Order sent: " + crChunkOrderText(compiled)),
         compiled.negative ? h("div", { style: { marginTop: CR_S_1 } }, "Negative: " + compiled.negative) : null
       )
     )),
@@ -15887,15 +15993,14 @@ async function crChatImgBuildPrompt(desc: string, sender: Character) : Promise<C
   if (!description){
     return null;
   }
+  // The sender, then chat members the description names, then the rest of the chat, up to four.
   const cast: CrCastCard[] = [sender];
-  const others = crDetectCast(description);
-  for (let i = 0; i < others.length; i++){
-    if (others[i].id === sender.id){
-      continue;
-    }
-    cast.push(others[i]);
-    if (cast.length >= 4){
-      break;
+  const chat = crChatCast();
+  const named = crDetectCast(description);
+  const pool = named.filter((n) => chat.length === 0 || chat.some((c) => c.id === n.id)).concat(chat);
+  for (let i = 0; i < pool.length && cast.length < 4; i++){
+    if (!cast.some((c) => c.id === pool[i].id)){
+      cast.push(pool[i]);
     }
   }
 
@@ -15944,7 +16049,7 @@ async function crChatImgBuildPrompt(desc: string, sender: Character) : Promise<C
 async function crChatImgDispatch(uuid: string, built: CrChatImgBuilt) : Promise<void>
 {
   const compiled = crCompileImgFields();
-  await crBridgeSend("GENERATE_IMAGE", {
+  await crImgSend({
     uuid: uuid,
     prompt: built.prompt,
     extraBaseVisuals: built.base,
@@ -15958,7 +16063,8 @@ async function crChatImgDispatch(uuid: string, built: CrChatImgBuilt) : Promise<
       steps: crImgSettings.steps,
       seed: crImgSettings.seed,
       quality: compiled.quality,
-      negative: compiled.negative, qualityLast: true, siteParams: true
+      negative: compiled.negative, qualityLast: true, siteParams: true,
+      qualityStart: compiled.start, qualityMid: compiled.mid
     }
   });
 }
@@ -20085,6 +20191,7 @@ type CrBridgeState = {
   bridgeEngine: string;
   bridgeCrAware: boolean;
   bridgeCcavClear: boolean;
+  bridgeImgSpots: boolean;
   viewportW: number;
   viewportH: number;
   unknownEvents: string[];
@@ -20098,6 +20205,7 @@ let crBridge: CrBridgeState = {
   bridgeEngine: "",
   bridgeCrAware: false,
   bridgeCcavClear: false,
+  bridgeImgSpots: false,
   viewportW: 0,
   viewportH: 0,
   unknownEvents: []
@@ -20145,6 +20253,21 @@ async function crBridgeSend(event: string, data?: Record<string, any>) : Promise
   }
 }
 
+// [CR-IMGV5] Every CR image request. A bridge that has not acked imgSpots (before 3.0.38) knows one chunk spot,
+// so Start and After-scene chunks are folded into the prompt for it.
+async function crImgSend(data: Record<string, any>) : Promise<void>
+{
+  const st: any = data.settings || {};
+  if (!crBridge.bridgeImgSpots){
+    if (st.qualityStart || st.qualityMid){
+      data.prompt = [st.qualityStart, data.prompt, st.qualityMid].filter(Boolean).join(", ");
+    }
+    delete st.qualityStart;
+    delete st.qualityMid;
+  }
+  await crBridgeSend("GENERATE_IMAGE", data);
+}
+
 function crBridgeNoteUnknown(event: string)
 {
   if (!event || crBridge.unknownEvents.indexOf(event) >= 0){
@@ -20171,6 +20294,7 @@ async function crBridgeHandleMessage(msg: any) : Promise<void>
       crBridge.lastAckAt = Date.now();
       crBridge.bridgeEngine = String(payload.engine || "");
       crBridge.bridgeCrAware = payload.crAware === true;
+      crBridge.bridgeImgSpots = payload.imgSpots === true;
       const ccavClear = payload.ccavClear === true;
       if (ccavClear !== crBridge.bridgeCcavClear){
         crBridge.bridgeCcavClear = ccavClear;

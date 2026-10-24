@@ -22,7 +22,9 @@ eq("fits under the 24 cap", CR_IMG_FIELDS_STANDARD.length <= 24, true);
 
 // --- compile per model
 crImgFields = crSanitizeImgFields(undefined);
-eq("V5 compile", crCompileImgFields("nai-diffusion-5-full"), {
+// [CR] 1.0.8 adds start/mid spots to the result; compare the two fields this test pins.
+const pick2 = (c: any) => ({ quality: c.quality, negative: c.negative });
+eq("V5 compile", pick2(crCompileImgFields("nai-diffusion-5-full")), {
   quality: "very aesthetic, masterpiece, no text",
   negative: "lowres, bad hands, bad anatomy, artistic error, sepia, white haze, worst quality, very displeasing, jpeg artifacts, 0::ai-generated::"
 });

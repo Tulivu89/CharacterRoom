@@ -1,7 +1,7 @@
 // ============================================================================
 // cr-imgv5-smoke.js — the image pipeline from CR-IMAGE-PROMPTS v1.2  [CR-IMGV5]
 //
-// Pins engine 1.0.7 (D-109, D-110): the review's own tests (cr-scene-v2.test.ts, 67 cases;
+// Pins engine 1.0.7 (D-109, D-110) and 1.0.8 (D-112, D-113): the review's own tests (cr-scene-v2.test.ts, 67 cases;
 // cr-img-chunks.test.ts, 26 cases) run inside the whole engine, then the engine's wiring:
 // User detection, Generate / Enhance / photo payloads on GLM-4.6 with thinking off, picked people
 // always drawn, POV photos draw nobody, slot prompts, emotion defaults, per-model tuning, the
@@ -64,7 +64,7 @@ async function load(env) {
         tokenizer: { encode: (t) => Array.from(String(t)), decode: async () => '' },
         maxTokens: async () => 8192, rolloverTokens: async () => 1024,
         systemPrompt: { get: async () => 'SYS' },
-        document: stub('document'),
+        document: env.document || stub('document'),
         permissions: { has: async () => true, request: async () => true },
         config: { get: async () => true },
         uuid: (() => { let n = 0; return () => 'uuid-' + (++n); })(),
@@ -115,7 +115,7 @@ async function load(env) {
         'crIllusEnhance', 'crIllusGenerate', 'crIllusShown', 'crChatImgBuildPrompt', 'crDetectCast', 'crAssembleCharacterPrompt',
         'crGenerateSlot', 'crSlotTag', 'crImgFields', 'crImgSettings', 'crCompileImgFields', 'crImgPickModel',
         'CrChatBrainsTab', 'crBrainOpen', 'CR_ARCH_INSTRUCTION', 'CR_ARCH_PHOTO_INSTRUCTION', 'crSanitizeContactExtra',
-        'crImgAddStandard', 'CR_IMG_FIELDS_STANDARD', 'crPostsImgAsk'];
+        'crImgAddStandard', 'CR_IMG_FIELDS_STANDARD', 'crPostsImgAsk', 'crChatCast', 'crParseScene', 'crGroup', 'CrIllusComposer', 'crArchitectScene', 'crGroupLoad'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -204,7 +204,7 @@ const PAIRED = (extra) => Object.assign({ storage: { characterListKey: [SUNNY, M
   await X.crIllusEnhance()();
   let g = L.rec.gens[L.rec.gens.length - 1];
   ok('enhance: GLM-4.6 at 0.5 with thinking off', g && g.params.model === 'glm-4-6' && g.params.temperature === 0.5 && g.params.enable_thinking === false, g && g.params);
-  ok('enhance: the Scan system prompt, a rough-idea user message with handles', g && g.msgs[0].content === X.CR_ARCH_INSTRUCTION() && /Rough idea/.test(g.msgs[1].content) && /Handle: man in apron/.test(g.msgs[1].content) && /Location: drawn separately/.test(g.msgs[1].content), g && g.msgs[1].content);
+  ok('enhance: the Scan system prompt, a rough-idea user message with the chat\'s people only', g && g.msgs[0].content === X.CR_ARCH_INSTRUCTION() && /Rough idea/.test(g.msgs[1].content) && /Handle: cat girl/.test(g.msgs[1].content.split('People')[1]) && !/Marco/.test(g.msgs[1].content.split('People')[1]) && /Location: drawn separately/.test(g.msgs[1].content), g && g.msgs[1].content);
   ok('enhance: the box gets the text and the cast becomes the people in view', X.crIllus().prompt.indexOf('@Sunny') >= 0 && X.crIllus().cast.join() === 'c1', X.crIllus().cast);
 
   // --- photos: photo prompt, sender flagged, no Scenario location; POV draws nobody
@@ -271,6 +271,47 @@ const PAIRED = (extra) => Object.assign({ storage: { characterListKey: [SUNNY, M
   ok('brains (phone): tapping opens the text and the choices', strs.indexOf('Grew up by the docks.') >= 0 && strs.indexOf('Sunny has a sister.') >= 0 && strs.indexOf('| Auto | Always | Off') >= 0, strs.slice(0, 600));
   strs = flat(X.CrChatBrainsTab()({ mobile: false })).filter((x) => typeof x === 'string').join(' | ');
   ok('brains (desktop): text shown as before', strs.indexOf('Grew up by the docks.') >= 0);
+
+  // --- 1.0.8: chunk spots, the old-bridge fold, people from the chat, @ lines by description
+  L = await load(PAIRED());
+  X = L.X;
+  X.crImgSettings().model = 'nai-diffusion-4-5-full';
+  X.crImgFields().push({ id: 'artist', label: 'Artist', basePrompt: 'artist:someone', uc: '', weight: 1, active: true, spot: 'start' },
+                       { id: 'look', label: 'Look', basePrompt: 'flat color', uc: '', weight: 1, active: true, spot: 'mid' });
+  let cc = X.crCompileImgFields()();
+  ok('spots: start and after-scene chunks compile apart from the end', cc.start === 'artist:someone' && cc.mid === 'flat color' && /masterpiece/.test(cc.quality), cc);
+  X.crIllus().prompt = 'full body, outdoors, day. Cat girl waves.\n@Sunny: standing, waving';
+  X.crIllus().cast = ['c1'];
+  X.crBridge().bridgeImgSpots = true;
+  await X.crIllusGenerate()();
+  sent = L.rec.sent[L.rec.sent.length - 1];
+  ok('spots: a 3.0.38 bridge gets them as settings', sent.settings.qualityStart === 'artist:someone' && sent.settings.qualityMid === 'flat color' && /^1girl/.test(sent.prompt), sent.settings);
+  X.crBridge().bridgeImgSpots = false;
+  await X.crIllusGenerate()();
+  sent = L.rec.sent[L.rec.sent.length - 1];
+  ok('spots: an older bridge gets them folded into the prompt', /^artist:someone, 1girl, solo/.test(sent.prompt) && /, flat color$/.test(sent.prompt) && sent.settings.qualityStart === undefined, sent.prompt);
+
+  const WOLF = { cardType: 'contact', id: 'c3', name: 'Garm', gender: 'male', species: 'wolf', emotions: {}, exampleChats: [], brains: [], brainsConditional: [] };
+  const KAT = { cardType: 'contact', id: 'c4', name: 'Kat', gender: 'female', species: '', emotions: {}, exampleChats: [], brains: [], brainsConditional: [] };
+  L = await load({ storage: { characterListKey: [KAT, WOLF, SUNNY], userListKey: [SAM], scenarioListKey: [] },
+    storyStorage: { chatSettingsKey: { char: KAT, user: SAM, intimacy: 'close', style: 'chat', responseLength: 'unspecified' }, 'cr.group': { v: 1, members: ['c4', 'c3'], pools: {} } },
+    bridge: { json: '' },
+    document: { history: { currentNodeId: async () => 1, nodeState: async () => ({ sections: [{ section: { text: 'Kat glares into the dark.' } }] }) } },
+    genText: 'cowboy shot, night, rating:general. Woman kneels at left. Wolf man stands at right.\n@woman (left): kneeling, angry\n@wolf-man (right): standing, looking down' });
+  X = L.X;
+  await X.crGroupLoad()();
+  const cid = X.crChatCast()().map((c) => c.id).join();
+  ok('chat cast: the Contact, the group members and the User, no one else', cid === 'c4,c3,u-sam', cid);
+  const pr = X.crParseScene()('cowboy shot.\n@woman (left): kneeling\n@wolf-man (right): standing', X.crChatCast()());
+  ok('@ lines: @woman and @wolf-man find Kat and Garm', pr.people.map((p) => p.card.id).join() === 'c4,c3' && pr.unknown.length === 0, pr.people.map((p) => p.card.id));
+  const pr2 = X.crParseScene()('wide shot.\n@guy: standing', X.crChatCast()());
+  ok('@ lines: a kind word two cards share stays unknown', pr2.people.length === 0 && pr2.unknown[0] === 'guy', pr2);
+  const sc = await X.crArchitectScene()(4);
+  g = L.rec.gens[L.rec.gens.length - 1];
+  ok('scan: the People list is the chat, named or not', g && /- Kat: girl/.test(g.msgs[1].content) && /- Garm: boy\. Handle: wolf man/.test(g.msgs[1].content) && /- Sam: boy/.test(g.msgs[1].content) && !/Sunny/.test(g.msgs[1].content), g && g.msgs[1].content);
+  ok('scan: the writer is told to use names after @', /never the handle/.test(X.CR_ARCH_INSTRUCTION()));
+  strs = flat(X.CrIllusComposer()({ st: { layout: 'mobile' } })).filter((x) => typeof x === 'string').join(' | ');
+  ok('composer: the picker offers only the chat', /Kat/.test(strs) && /Garm/.test(strs) && /Sam/.test(strs) && !/Sunny/.test(strs), strs.slice(0, 500));
 
   console.log('\n' + pass + ' passing, ' + fail + ' failing');
   if (fail) process.exit(1);
