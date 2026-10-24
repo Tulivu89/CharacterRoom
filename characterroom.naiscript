@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.5
+version: 1.0.6
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.5. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.6. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -5536,7 +5536,16 @@ function crBrainView(card: any) : any
   const copy: any = Object.assign({}, card);
   copy.brains = (card.brains || []).filter((b: BrainEntry) => off.indexOf("b:" + b.name) < 0);
   if (Array.isArray(card.brainsConditional)){
-    copy.brainsConditional = card.brainsConditional.filter((b: BrainComplexConditional) => off.indexOf("c:" + b.name) < 0);
+    // Always: sent with the card's own brains whatever the keys or intimacy, so it works on a
+    // User or Scenario too, where AnotherRoom never reads conditional entries.
+    const conds: BrainComplexConditional[] = card.brainsConditional;
+    for (let i = 0; i < conds.length; i++){
+      if (off.indexOf("a:" + conds[i].name) >= 0 && off.indexOf("c:" + conds[i].name) < 0 && String(conds[i].content || "").trim()){
+        copy.brains.push({ name: conds[i].name, content: conds[i].content });
+      }
+    }
+    copy.brainsConditional = conds.filter((b: BrainComplexConditional) =>
+      off.indexOf("c:" + b.name) < 0 && off.indexOf("a:" + b.name) < 0);
   }
   for (let i = 0; i < sets.length; i++){
     const v = crSetActiveVariant(sets[i]);
@@ -5619,6 +5628,26 @@ async function crSetBrainOff(cardId: string, key: string, off: boolean) : Promis
   try{ await api.v1.storyStorage.set(CR_BRAINS_OFF_KEY, crBrainsOff); }
   catch (e){ api.v1.error("[CR:sets] could not store the brain switches:", e); }
   crTouch();
+}
+
+// A conditional entry is Auto (its keys decide), Always (sent every build in this chat) or Off.
+async function crSetCondMode(cardId: string, name: string, mode: string) : Promise<void>
+{
+  const list = (crBrainsOff[cardId] || []).filter((k) => k !== "c:" + name && k !== "a:" + name);
+  if (mode === "off"){ list.push("c:" + name); }
+  else if (mode === "always"){ list.push("a:" + name); }
+  if (list.length){ crBrainsOff[cardId] = list; }
+  else { delete crBrainsOff[cardId]; }
+  try{ await api.v1.storyStorage.set(CR_BRAINS_OFF_KEY, crBrainsOff); }
+  catch (e){ api.v1.error("[CR:sets] could not store the brain switches:", e); }
+  crTouch();
+}
+
+function crCondMode(cardId: string, name: string) : string
+{
+  if (crBrainIsOff(cardId, "c:" + name)){ return "off"; }
+  if (crBrainIsOff(cardId, "a:" + name)){ return "always"; }
+  return "auto";
 }
 
 async function crFloatySetActive(id: string, on: boolean) : Promise<void>
@@ -5860,23 +5889,37 @@ function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string;
     }));
   });
   conds.forEach((c, i) => {
-    const off = crBrainIsOff(card.id, "c:" + c.name);
+    const mode = crCondMode(card.id, c.name);
     let state = "waiting";
     let tone = "";
-    if (off){ state = "suppressed"; }
+    if (mode === "off"){ state = "suppressed"; }
+    else if (mode === "always"){ state = "always on"; tone = "accent"; }
     else if (!props.readsConditional){ state = "not read"; }
     else if (c.requiredIntimacy && c.requiredIntimacy !== "none" && c.requiredIntimacy !== chatSettings.intimacy){ state = "needs " + c.requiredIntimacy; }
     else if (fired && fired.names.indexOf(c.name) >= 0){ state = "fired last build"; tone = "accent"; }
-    rows.push(h(CrBrainSwitchRow, {
-      key: "c" + i, name: c.name, off: off, state: state, tone: tone,
-      detail: "Keys: " + ((c.keys || []).join(", ") || "none") + "  ·  " + crBrainPreview(c.content),
-      onToggle: () => { crSetBrainOff(card.id, "c:" + c.name, !off).catch(() => {}); }
-    }));
+    rows.push(h("div", {
+      key: "c" + i,
+      style: { padding: CR_S_2 + " 0", borderTop: CR_LINE_W + " solid " + CR_LINE, opacity: mode === "off" ? "0.62" : "1" }
+    },
+      h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "flex-start" } },
+        h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
+          h("div", { style: { color: CR_HEAD, fontSize: CR_T_BASE, fontWeight: "600" } }, c.name || "Unnamed"),
+          h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
+            "Keys: " + ((c.keys || []).join(", ") || "none") + "  ·  " + crBrainPreview(c.content))
+        ),
+        h(CrPill, { text: state, tone: tone })
+      ),
+      h("div", { style: { marginTop: CR_S_2 } }, h(CrChoice, {
+        options: [{ id: "auto", label: "Auto" }, { id: "always", label: "Always" }, { id: "off", label: "Off" }],
+        active: mode,
+        onPick: (id: string) => { crSetCondMode(card.id, c.name, id).catch(() => {}); }
+      }))
+    ));
   });
   return h(CrSection, {
     title: (card.name || "Unnamed") + "  ·  " + props.role,
     note: (!props.readsConditional && conds.length)
-      ? "AnotherRoom reads conditional brains from the speaking Contact only, so this card's conditional entries never reach the model."
+      ? "AnotherRoom reads conditional brains from the speaking Contact only, so on Auto this card's conditional entries never reach the model. Always sends one with the card's own brains."
       : undefined
   },
     h("div", { style: { marginTop: CR_S_2 } },
@@ -5902,7 +5945,8 @@ function CrChatBrainsTab(props: { mobile: boolean }) : any
     h(CrSection, {
       title: "Brains in this chat",
       note: "Suppress takes a brain out of this story's context without touching the card; Restore puts it back. "
-        + "A set sends the one version in use. Conditional entries show what the last build did with them."
+        + "A set sends the one version in use. A conditional entry is Auto (its keys decide, and the pill says what the "
+        + "last build did), Always (sent every time in this chat, keys or not) or Off."
     }, fired ? h("div", { style: { marginTop: CR_S_2, color: CR_DIM, fontSize: CR_T_SM } },
         "Last build " + crReportAgo(fired.at) + ".") : null),
     h(CrBrainsOwner, { card: contact, kind: "contact", role: "Contact", mobile: props.mobile, readsConditional: true }),
@@ -5911,7 +5955,7 @@ function CrChatBrainsTab(props: { mobile: boolean }) : any
     members.map((m) => h(CrBrainsOwner, { key: m.id, card: m, kind: "contact", role: "Group member, read when they speak", mobile: props.mobile, readsConditional: true })),
     h(CrSection, {
       title: "Floaty brains",
-      note: "This story's floaty brains, the same switches as the CR Brains panel."
+      note: "This story's floaty brains, the same switches as the CR Brains panel. They have no keys: On means sent every time."
     }, h("div", { style: { marginTop: CR_S_2 } },
       floatyBrainsList.length ? floatyBrainsList.map((b) => h(CrBrainSwitchRow, {
         key: b.id, name: b.entry.name, detail: crBrainPreview(b.entry.content), off: !b.active,
@@ -7517,9 +7561,11 @@ async function crPickFolderFor(kind: CrCardKind, card: CrAnyCard) : Promise<void
   const cur = crFolderOf(kind, card.id) || CR_FOLDER_NONE;
   await crOpenPickSheet("Folder for " + crCardLabel(card), "Only this list's folders are offered.", opts, cur, (id: string) => {
     if (id === CR_FOLDER_NEW){
-      crOpenNameSheet("New folder", "Folders are yours alone: they stay on this account and never go out with an exported card.", "", (name: string) => {
-        crFolderAdd(kind, name).then((n) => n ? crFolderMove(card.id, n) : undefined).catch(() => {});
-      }).catch(() => {});
+      crClosePickSheet()
+        .then(() => crOpenNameSheet("New folder", "Folders are yours alone: they stay on this account and never go out with an exported card.", "", (name: string) => {
+          crFolderAdd(kind, name).then((n) => n ? crFolderMove(card.id, n) : undefined).catch(() => {});
+        }))
+        .catch(() => {});
       return;
     }
     crFolderMove(card.id, id === CR_FOLDER_NONE ? "" : id).catch(() => {});
@@ -7757,12 +7803,16 @@ async function crSlotDownload(charId: string, slot: string) : Promise<void>
   await crBridgeSend(CR_EVT_CHAR_IMAGE_ACTION, { charId: charId, slot: slot, op: "download" });
 }
 
+let crModalSeq = 0;
+
 async function crJsxModal(title: string, size: "small" | "medium" | "large" | "full", body: () => any) : Promise<any>
 {
   let handle: any = null;
+  crModalSeq++;
   const part: any = {
     type: "jsx",
-    id: "cr-modal-jsx",
+    // Unique per modal: a modal opened from another's callback must not take over its mount.
+    id: "cr-modal-jsx-" + String(crModalSeq),
     style: { display: "grid", gridTemplateRows: "minmax(0,1fr)", gridTemplateColumns: "minmax(0,1fr)" },
     onMount: function(elem: any){
       try{

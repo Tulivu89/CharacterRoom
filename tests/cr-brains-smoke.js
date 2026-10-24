@@ -1,7 +1,7 @@
 // ============================================================================
 // cr-brains-smoke.js — brain sets and per-chat brain switches  [CR-SETS]
 //
-// Pins engine 1.0.5 (D-107): a set sends its variant in use as one brain, Suppress takes a card,
+// Pins engine 1.0.5 (D-107) and 1.0.6 (D-108): a set sends its variant in use as one brain, Suppress takes a card,
 // conditional or set brain out of this story's context, the variant's image pair joins the
 // pictures, a Stage set replaces the Banner, and with no sets or switches the kernel receives
 // the card itself. AnotherRoom has no such feature, so parity cannot pin it; this file does.
@@ -53,7 +53,7 @@ async function load(env) {
         reportDiagnostics: false
     }).outputText;
 
-    const rec = { toasts: [], prompts: 0, ops: [] }; const HOOKS = {};
+    const rec = { toasts: [], prompts: 0, ops: [], modals: [] }; const HOOKS = {};
     const storage = makeStore(env.storage || { characterListKey: [], userListKey: [], scenarioListKey: [] }); const storyStorage = makeStore(env.storyStorage || {}); const historyStorage = makeStore(env.historyStorage || {});
     const X = {};
     const v1 = {
@@ -71,6 +71,7 @@ async function load(env) {
         script: { name: 'smoke', id: 'smoke', version: '0.0.0', getAllowedOutput: () => 5000, getAllowedInput: () => 60000 },
         ui: new Proxy({}, { get(t, k) {
             if (k === 'toast') return async (m, o) => { rec.toasts.push({ text: String(m), type: o && o.type }); };
+            if (k === 'modal') return { open: async (o) => { rec.modals.push(o && o.content && o.content[0] && o.content[0].id); return { close: async () => {}, update: async () => {}, isClosed: () => false, closed: Promise.resolve() }; } };
             if (k === 'then') return undefined;
             return stub('ui.' + String(k));
         } }),
@@ -107,10 +108,10 @@ async function load(env) {
         setTimeout, clearTimeout
     });
     const names = ['crSmartImport', 'crClassifyCardFile', 'crCardImportReceive', 'crBridge', 'charList', 'userList',
-        'scenarioList', 'crUiStore', 'importCharacter', 'importUser', 'importScenario', 'CrPairingPanel', 'CrGroupTab', 'CrGroupMembersRow', 'crGroupInit', 'CrPairRow', 'CrPressable', 'crBrainView', 'crPickVariant', 'crSetBrainOff', 'crBrainsFired', 'crAssembleCharacterPrompt', 'crSceneBasePrompt', 'crStageBackdropSlot', 'crSanitizeContactExtra', 'CrChatBrainsTab', 'crSetActive', 'crBrainsOff', 'chatSettings'];
+        'scenarioList', 'crUiStore', 'importCharacter', 'importUser', 'importScenario', 'CrPairingPanel', 'CrGroupTab', 'CrGroupMembersRow', 'crGroupInit', 'CrPairRow', 'CrPressable', 'crBrainView', 'crPickVariant', 'crSetBrainOff', 'crBrainsFired', 'crAssembleCharacterPrompt', 'crSceneBasePrompt', 'crStageBackdropSlot', 'crSanitizeContactExtra', 'CrChatBrainsTab', 'crSetActive', 'crBrainsOff', 'chatSettings', 'crSetCondMode', 'crCondMode', 'crJsxModal', 'crPickFolderFor', 'crPickApply'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;return {${exp}};\n})()`, ctx, { filename: ENGINE });
-    Object.assign(X, exported); X.HOOKS = HOOKS; X.history = historyStorage; X.story = storyStorage;
+    Object.assign(X, exported); X.rec = rec; X.HOOKS = HOOKS; X.history = historyStorage; X.story = storyStorage;
     if (env.bridge) X.crBridge().ready = true;
     return { X, rec, storage };
 }
@@ -203,6 +204,31 @@ const flat = (n, out) => { out = out || []; if (n == null || typeof n !== 'objec
   const tab = flat(X.CrChatBrainsTab()({ mobile: false })).filter((x) => typeof x === 'string');
   ok('tab: every owner and the floaty section are listed', ['Mira  ·  Contact', 'Sam  ·  User', 'Port  ·  Scenario', 'Floaty brains'].every((t) => tab.indexOf(t) >= 0), tab.slice(0, 40));
   ok('tab: states read from the switches', tab.indexOf('suppressed') >= 0 && tab.indexOf('in context') >= 0, tab);
+  // ---- 1.0.6: Always
+  await X.crSetCondMode()('c-mira', 'Sister', 'always');
+  p = await sheet();
+  ok('always: a conditional entry is sent every build, keys or not', p.indexOf('----\nSister\nMira has a sister.') >= 0, p.slice(-300));
+  r = await before('nothing relevant');
+  ok('always: and it is not also sent through the keys', JSON.stringify(r).indexOf('Mira has a sister.') < 0, r);
+  ok('always: the switch is stored as one mode', JSON.stringify((await X.story.get('cr.brainsOff'))['c-mira']) === '["a:Sister"]', await X.story.get('cr.brainsOff'));
+  await X.crSetCondMode()('c-mira', 'Sister', 'off');
+  ok('modes: Off replaces Always', X.crCondMode()('c-mira', 'Sister') === 'off' && (await sheet()).indexOf('Mira has a sister.') < 0);
+  await X.crSetCondMode()('c-mira', 'Sister', 'auto');
+  ok('modes: Auto clears the switch', X.crCondMode()('c-mira', 'Sister') === 'auto' && !X.crBrainsOff()['c-mira']);
+  const SAM2 = X.chatSettings().user;
+  SAM2.brainsConditional = [{ name: 'Sam Secret', content: 'Sam is afraid of the dark.', keys: ['dark'], requiredIntimacy: 'none' }];
+  await X.crSetCondMode()('u-sam', 'Sam Secret', 'always');
+  p = await sheet();
+  ok('always: works on a User, where Auto never fires', p.indexOf('Sam is afraid of the dark.') >= 0, p.slice(-300));
+  // ---- 1.0.6: modals
+  await X.crJsxModal()('A', 'small', () => null);
+  await X.crJsxModal()('B', 'small', () => null);
+  ok('modal: each modal mounts under its own part id', X.rec.modals.length === 2 && X.rec.modals[0] !== X.rec.modals[1], X.rec.modals);
+  await X.crPickFolderFor()('contact', MIRA);
+  const n0 = X.rec.modals.length;
+  X.crPickApply()('__new');
+  await new Promise((res) => setTimeout(res, 0)); await new Promise((res) => setTimeout(res, 0));
+  ok('folder: New folder from the picker opens the name sheet in its own modal', X.rec.modals.length === n0 + 1 && X.rec.modals[n0] !== X.rec.modals[n0 - 1], X.rec.modals);
   console.log(pass + ' passing, ' + fail + ' failing');
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });
