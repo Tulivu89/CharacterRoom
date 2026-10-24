@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.3
+version: 1.0.5
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.3. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.5. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -41,8 +41,10 @@ SECTIONS (search "SECTION <NAME>")
   HOOKS-MISC  onGenerationEnd, onHistoryNavigated
   K-CONTEXT   onBeforeContextBuild and onContextBuilt, adapters over K
   CR-DATA     CR-only card fields and import sanitizers
+  CR-SETS     brain sets (one variant in use), per-chat brain switches, Chat > Brains
   CR-BUBBLE   chat bubble look: record, resolver, the message segmenter, shaped markers
-  CR-UI       shell window, tokens, surfaces, editor portraits, report; Chat > Chat opens cards and lists the group
+  CR-UI       shell window, tokens, surfaces, editor portraits, report; Chat > Chat opens cards and lists the group;
+              card lists with folders, search, sort and a grid [CR-FOLDERS]
   CR-IMG      image settings, prompt chunks, slot generation
   CR-SCAN     story scan, cast detection, architect and enhance passes
   CR-ILLUS    illustrator
@@ -70,13 +72,13 @@ HOOKS
 STORAGE
   account  characterListKey userListKey scenarioListKey defaultAuthorKey useImageDecoKey
            useEmotionalModesKey emojiRefKey gameRecordKey includeGameStatsKey cr.stage
-           cr.rpg.rulesets
+           cr.rpg.rulesets cr.cardFolders
   story    chatSettingsKey trackRealTimeKey trackRealTimeRecordKey rememberMeKey
            floatyBrainsKey floatyBrainsStateKey floatyActiveIdsKey floatyInactiveIdsKey
            diaryBrainsRecordKey actionPlansRecordKey forumThreadsRecordKey
            emotionalMemoryRecordKey continuityCreationRecordKey cr.clockMode cr.clockStep
-           cr.group cr.rpg
-  history  cr.clock (undo rewinds the chat clock)
+           cr.group cr.rpg cr.brainsOff
+  history  cr.clock (undo rewinds the chat clock), cr.setActive (and the variant in use)
   temp     lastCropValuesTempKey, game display keys
 
 BRIDGE MESSAGES (channel "hypebot", envelope {type, sid, payload})
@@ -209,6 +211,11 @@ const FALLBACK_EMOTION: Emotion = "neutral";
 
 const CR_SLOT_AVATAR = "Avatar";
 const CR_SLOT_BANNER = "Banner";
+
+// [CR-SETS] Read by the K-CONTEXT adapter, so declared before anything that runs at load.
+let crSetActive: Record<string, string> = {};
+let crBrainsOff: Record<string, string[]> = {};
+let crBrainsFired: Record<string, { at: number; names: string[] }> = {};
 
 type APIMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -4768,9 +4775,9 @@ function crKernelCtx(extra: any): CrkCtx {
   const kChar = crGroupBuildChar || chatSettings.char;
   const cid = (kChar && chatSettings.user) ? kChar.id + chatSettings.user.id : "";
   const base: CrkCtx = {
-    char: kChar,
-    user: chatSettings.user,
-    scenario: chatSettings.scenario,
+    char: crBrainView(kChar),
+    user: crBrainView(chatSettings.user),
+    scenario: crBrainView(chatSettings.scenario),
     chat: { tags: chatSettings.tags, intimacy: chatSettings.intimacy, style: chatSettings.style, responseLength: chatSettings.responseLength },
     includeGameStats: false,
     gameRecord: gameRecord,
@@ -4800,7 +4807,7 @@ function crKernelDeps(): CrkDeps {
   };
 }
 
-api.v1.hooks.register("onBeforeContextBuild", ( params ) => {
+api.v1.hooks.register("onBeforeContextBuild", async ( params ) => {
   if (crGroupGenDepth > 0){
     return;
   }
@@ -4810,9 +4817,15 @@ api.v1.hooks.register("onBeforeContextBuild", ( params ) => {
   if (params.model !== "xialong-v1" || !chatSettings.char || !chatSettings.user){
     return;
   }
+  await crSetsRefresh();
+  const ctx = crKernelCtx({});
   const res = crkBrainEntries(params.model,
-    crChatImgStripIdsText(params.storyText ? params.storyText.content : ""), crKernelCtx({}));
+    crChatImgStripIdsText(params.storyText ? params.storyText.content : ""), ctx);
   if (res){
+    if (ctx.char && ctx.char.id){
+      crBrainsFired[ctx.char.id] = { at: Date.now(),
+        names: res.temporaryLorebookEntries.filter((e) => e.active !== false).map((e) => e.name) };
+    }
     return res;
   }
 });
@@ -4828,6 +4841,7 @@ api.v1.hooks.register("onContextBuilt", async ({ messages, model, dryRun, contin
     return;
   }
   const cid = chatSettings.char.id + chatSettings.user.id;
+  await crSetsRefresh();
   const ctx = crKernelCtx({
     includeGameStats: await api.v1.storage.get(INCLUDE_GAME_STATS_KEY),
     trackRealTime: crClockActive() ? true : await api.v1.storyStorage.get(TRACK_REAL_TIME_KEY),
@@ -4885,6 +4899,21 @@ interface CrOutfitChunk {
   active: boolean;
 }
 
+interface CrSetVariant {
+  id: string;
+  name: string;
+  content: string;
+  prompt?: string;
+  uc?: string;
+}
+
+interface CrBrainSet {
+  id: string;
+  name: string;
+  variants: CrSetVariant[];
+  stage?: boolean;
+}
+
 interface CrImgCard {
   basePrompt?: string;
   baseUC?: string;
@@ -4911,6 +4940,7 @@ interface CrUserExtra {
   images?: CrSimpleImages;
   profile?: CrProfile;
   img?: CrImgCard;
+  sets?: CrBrainSet[];
 }
 
 interface CrSceneCard {
@@ -4925,6 +4955,7 @@ interface CrScenarioExtra {
   images?: CrSceneImages;
   profile?: CrProfile;
   img?: CrSceneCard;
+  sets?: CrBrainSet[];
 }
 
 interface CrContactExtra {
@@ -4934,6 +4965,7 @@ interface CrContactExtra {
   imgTags?: Record<string, string>;
   img?: CrImgCard;
   bubbles?: CrBubbleLook;
+  sets?: CrBrainSet[];
 }
 
 const CR_MAX_STATUS = 200;
@@ -5169,6 +5201,10 @@ function crSanitizeUserExtra(v: any) : CrUserExtra | undefined
   if (profile){
     out.profile = profile;
   }
+  const sets = crSanitizeSets((v as any).sets);
+  if (sets){
+    out.sets = sets;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -5209,6 +5245,10 @@ function crSanitizeScenarioExtra(v: any) : CrScenarioExtra | undefined
   }
   if (profile){
     out.profile = profile;
+  }
+  const sets = crSanitizeSets((v as any).sets);
+  if (sets){
+    out.sets = sets;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -5340,7 +5380,546 @@ function crSanitizeContactExtra(v: any) : CrContactExtra | undefined
   if (bubbles){
     out.bubbles = bubbles;
   }
+  const sets = crSanitizeSets((v as any).sets);
+  if (sets){
+    out.sets = sets;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+// ============================================================================
+// SECTION CR-SETS — BRAIN SETS (ONE VARIANT ACTIVE) AND PER-CHAT BRAIN SWITCHES
+// ============================================================================
+// The kernel is never edited: crBrainView hands it a copy of a card with suppressed brains taken
+// out and each set's active variant added as one more brain. With no sets and nothing suppressed
+// it returns the card itself, so context is AnotherRoom's byte for byte.
+
+const CR_SET_MAX = 8;
+const CR_VARIANT_MAX = 16;
+const CR_SETS_ACTIVE_KEY = "cr.setActive";
+const CR_BRAINS_OFF_KEY = "cr.brainsOff";
+
+function crShortId(prefix: string) : string
+{
+  return prefix + api.v1.uuid().replace(/-/g, "").slice(0, 8);
+}
+
+function crSanitizeSets(v: any) : CrBrainSet[] | undefined
+{
+  if (!Array.isArray(v)){
+    return undefined;
+  }
+  const out: CrBrainSet[] = [];
+  for (let i = 0; i < v.length && out.length < CR_SET_MAX; i++){
+    const raw = v[i];
+    if (!raw || typeof raw !== "object"){
+      continue;
+    }
+    const sid = crSanitizeText(raw.id, 32);
+    if (!sid || !/^[A-Za-z0-9_-]+$/.test(sid)){
+      continue;
+    }
+    const vars: CrSetVariant[] = [];
+    const rv: any[] = Array.isArray(raw.variants) ? raw.variants : [];
+    for (let j = 0; j < rv.length && vars.length < CR_VARIANT_MAX; j++){
+      const r = rv[j];
+      const vid = (r && typeof r === "object") ? crSanitizeText(r.id, 24) : undefined;
+      if (!vid || !/^[A-Za-z0-9_-]+$/.test(vid)){
+        continue;
+      }
+      const one: CrSetVariant = {
+        id: vid,
+        name: crSanitizeText(r.name, 80) || "",
+        content: crSanitizeText(r.content, 4000) || ""
+      };
+      const p = crSanitizeText(r.prompt, 600);
+      const u = crSanitizeText(r.uc, 600);
+      if (p){ one.prompt = p; }
+      if (u){ one.uc = u; }
+      vars.push(one);
+    }
+    const set: CrBrainSet = { id: sid, name: crSanitizeText(raw.name, 80) || "", variants: vars };
+    if (raw.stage === true){ set.stage = true; }
+    out.push(set);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+try{
+  await api.v1.storyStorage.setIfAbsent(CR_BRAINS_OFF_KEY, {});
+  crBrainsOff = crSanitizeBrainsOff(await api.v1.storyStorage.get(CR_BRAINS_OFF_KEY));
+}
+catch (e){ api.v1.error("[CR:sets] could not read the brain switches:", e); }
+try{ crSetActive = crSanitizeSetActive(await api.v1.historyStorage.get(CR_SETS_ACTIVE_KEY)); }
+catch (e){ api.v1.error("[CR:sets] could not read the active variants:", e); }
+
+function crSanitizeBrainsOff(v: any) : Record<string, string[]>
+{
+  const out: Record<string, string[]> = {};
+  if (!v || typeof v !== "object"){
+    return out;
+  }
+  const ids = Object.keys(v);
+  for (let i = 0; i < ids.length; i++){
+    const list: any[] = Array.isArray(v[ids[i]]) ? v[ids[i]] : [];
+    const keep = list.filter((x) => typeof x === "string" && x.length > 2).map((x) => String(x).slice(0, 200));
+    if (keep.length){
+      out[ids[i]] = keep;
+    }
+  }
+  return out;
+}
+
+function crSanitizeSetActive(v: any) : Record<string, string>
+{
+  const out: Record<string, string> = {};
+  if (!v || typeof v !== "object"){
+    return out;
+  }
+  const ids = Object.keys(v);
+  for (let i = 0; i < ids.length; i++){
+    if (typeof v[ids[i]] === "string"){
+      out[ids[i]] = v[ids[i]];
+    }
+  }
+  return out;
+}
+
+// Undo moves the history node under the cache, so every build reads the node it is building at.
+async function crSetsRefresh() : Promise<void>
+{
+  try{ crSetActive = crSanitizeSetActive(await api.v1.historyStorage.get(CR_SETS_ACTIVE_KEY)); }
+  catch (e){ api.v1.error("[CR:sets] could not read the active variants:", e); }
+}
+
+function crCardById(id: string) : CrAnyCard | undefined
+{
+  return charList.find((c) => c.id === id) || userList.find((u) => u.id === id) || scenarioList.find((s) => s.id === id);
+}
+
+function crCardSets(card: CrAnyCard | undefined) : CrBrainSet[]
+{
+  const live: any = card ? (crCardById(card.id) || card) : undefined;
+  return (live && live.cr && Array.isArray(live.cr.sets)) ? live.cr.sets : [];
+}
+
+function crSetActiveVariant(set: CrBrainSet) : CrSetVariant | undefined
+{
+  if (!set.variants.length){
+    return undefined;
+  }
+  const want = crSetActive[set.id];
+  return set.variants.find((x) => x.id === want) || set.variants[0];
+}
+
+function crBrainIsOff(cardId: string, key: string) : boolean
+{
+  const list = crBrainsOff[cardId];
+  return !!(list && list.indexOf(key) >= 0);
+}
+
+function crSetIsOff(cardId: string, set: CrBrainSet) : boolean
+{
+  return crBrainIsOff(cardId, "s:" + set.id);
+}
+
+function crBrainView(card: any) : any
+{
+  if (!card){
+    return card;
+  }
+  const sets = crCardSets(card).filter((s) => !crSetIsOff(card.id, s));
+  const off = crBrainsOff[card.id] || [];
+  if (!sets.length && !off.length){
+    return card;
+  }
+  const copy: any = Object.assign({}, card);
+  copy.brains = (card.brains || []).filter((b: BrainEntry) => off.indexOf("b:" + b.name) < 0);
+  if (Array.isArray(card.brainsConditional)){
+    copy.brainsConditional = card.brainsConditional.filter((b: BrainComplexConditional) => off.indexOf("c:" + b.name) < 0);
+  }
+  for (let i = 0; i < sets.length; i++){
+    const v = crSetActiveVariant(sets[i]);
+    if (v && v.content.trim()){
+      copy.brains.push({ name: (sets[i].name || "Set") + ": " + (v.name || "Variant"), content: v.content });
+    }
+  }
+  return copy;
+}
+
+// The active variants' image pairs, for whichever card they belong to.
+function crSetImagePairs(card: CrAnyCard | undefined, only?: { setId: string; variantId: string }) : { prompt: string[]; uc: string[] }
+{
+  const out = { prompt: [] as string[], uc: [] as string[] };
+  if (!card){
+    return out;
+  }
+  const sets = crCardSets(card);
+  for (let i = 0; i < sets.length; i++){
+    const s = sets[i];
+    let v: CrSetVariant | undefined;
+    if (only && only.setId === s.id){
+      v = s.variants.find((x) => x.id === only.variantId);
+    }
+    else if (crSetIsOff(card.id, s)){
+      continue;
+    }
+    else {
+      v = crSetActiveVariant(s);
+    }
+    if (v && v.prompt){ out.prompt.push(v.prompt); }
+    if (v && v.uc){ out.uc.push(v.uc); }
+  }
+  return out;
+}
+
+function crVariantSlot(v: CrSetVariant) : string
+{
+  return "v-" + v.id;
+}
+
+// The Scenario's backdrop: a Stage set's active variant when there is one, the Banner otherwise.
+function crStageBackdropSlot(scenario: Scenario | undefined) : string
+{
+  if (!scenario){
+    return CR_SLOT_BANNER;
+  }
+  const sets = crCardSets(scenario);
+  for (let i = 0; i < sets.length; i++){
+    if (sets[i].stage && !crSetIsOff(scenario.id, sets[i])){
+      const v = crSetActiveVariant(sets[i]);
+      if (v){
+        return crVariantSlot(v);
+      }
+    }
+  }
+  return CR_SLOT_BANNER;
+}
+
+async function crPickVariant(setId: string, variantId: string) : Promise<void>
+{
+  crSetActive[setId] = variantId;
+  try{ await api.v1.historyStorage.set(CR_SETS_ACTIVE_KEY, crSetActive); }
+  catch (e){ api.v1.error("[CR:sets] could not store the active variant:", e); }
+  crTouch();
+}
+
+async function crSetBrainOff(cardId: string, key: string, off: boolean) : Promise<void>
+{
+  const list = (crBrainsOff[cardId] || []).filter((k) => k !== key);
+  if (off){
+    list.push(key);
+  }
+  if (list.length){
+    crBrainsOff[cardId] = list;
+  }
+  else {
+    delete crBrainsOff[cardId];
+  }
+  try{ await api.v1.storyStorage.set(CR_BRAINS_OFF_KEY, crBrainsOff); }
+  catch (e){ api.v1.error("[CR:sets] could not store the brain switches:", e); }
+  crTouch();
+}
+
+async function crFloatySetActive(id: string, on: boolean) : Promise<void>
+{
+  const item = floatyBrainsList.find((b) => b.id === id);
+  if (!item){
+    return;
+  }
+  item.active = on;
+  floatyActiveIdsList = floatyActiveIdsList.filter((x) => x !== id);
+  floatyInactiveIdsList = floatyInactiveIdsList.filter((x) => x !== id);
+  if (on){
+    floatyActiveIdsList.unshift(id);
+  }
+  else {
+    floatyInactiveIdsList.push(id);
+  }
+  try{ await saveFloatyBrains(); }
+  catch (e){ api.v1.error("[CR:sets] could not store the floaty brain:", e); }
+  crTouch();
+}
+
+async function crSetCardSets(card: CrAnyCard, kind: CrCardKind, sets: CrBrainSet[]) : Promise<void>
+{
+  const anyCard: any = card;
+  const extra: any = anyCard.cr || {};
+  extra.sets = sets.length ? sets : undefined;
+  if (kind === "user"){ anyCard.cr = crSanitizeUserExtra(extra); }
+  else if (kind === "scenario"){ anyCard.cr = crSanitizeScenarioExtra(extra); }
+  else { anyCard.cr = crSanitizeContactExtra(extra); }
+  await crCommitCard(kind, "the sets", card);
+}
+
+async function crGenerateVariantImage(card: CrAnyCard, kind: CrCardKind, set: CrBrainSet, v: CrSetVariant) : Promise<void>
+{
+  if (!crBridge.ready){
+    try{ await api.v1.ui.toast("The bridge is not connected, so nothing can generate.", { type: "warning" }); }
+    catch (e){}
+    return;
+  }
+  const compiled = crCompileImgFields();
+  const slot = crVariantSlot(v);
+  const uuid = "cr-" + card.id.slice(0, 8) + "-" + slot + "-" + Date.now();
+  if (kind === "scenario"){
+    const sc: any = card;
+    const scene: CrSceneCard = (sc.cr && sc.cr.img) ? sc.cr.img : {};
+    const what = (v.prompt || "").trim() || (v.name || "").trim();
+    if (!what){
+      try{ await api.v1.ui.toast("Give this variant an image prompt first.", { type: "warning" }); }
+      catch (e){}
+      return;
+    }
+    await crBridgeSend("GENERATE_IMAGE", {
+      kind: "charSlot", charId: card.id, slot: slot, uuid: uuid,
+      prompt: [what, "no humans, scenery, wide shot"].join(", "),
+      extraBaseVisuals: (scene.basePrompt || "").trim(),
+      extraBaseUC: [(scene.baseUC || "").trim(), (v.uc || "").trim()].filter(Boolean).join(", "),
+      characters: [],
+      settings: {
+        model: crImgSettings.model, width: crImgSettings.width, height: crImgSettings.height,
+        scale: crImgSettings.scale, steps: crImgSettings.steps, seed: crImgSettings.seed,
+        quality: compiled.quality, negative: compiled.negative
+      }
+    });
+  }
+  else {
+    const cast = card as CrCastCard;
+    const assembled = crAssembleCharacterPrompt(cast, "avatar", { setId: set.id, variantId: v.id });
+    if (!assembled.visuals){
+      try{ await api.v1.ui.toast("This card has nothing to draw — write an Appearance or a Universal prompt first.", { type: "warning" }); }
+      catch (e){}
+      return;
+    }
+    const base = crAssembleBasePrompt(cast, "avatar");
+    await crBridgeSend("GENERATE_IMAGE", {
+      kind: "charSlot", charId: card.id, slot: slot, uuid: uuid,
+      prompt: "full body, standing, simple background",
+      extraBaseVisuals: base.base, extraBaseUC: base.uc,
+      characters: [{ name: cast.name || "character", visuals: assembled.visuals, uc: assembled.uc }],
+      settings: {
+        model: crImgSettings.model, width: crImgSettings.width, height: crImgSettings.height,
+        scale: crImgSettings.scale, steps: crImgSettings.steps, seed: crImgSettings.seed,
+        quality: compiled.quality, negative: compiled.negative
+      }
+    });
+  }
+  try{ await api.v1.ui.toast("Generating " + (v.name || "the variant") + "…", { type: "info", autoClose: 2500 }); }
+  catch (e){}
+}
+
+function CrVariantThumb(props: { cardId: string; v: CrSetVariant; size: number }) : any
+{
+  return h("div", {
+    style: {
+      position: "relative", width: props.size + "px", height: props.size + "px", flex: "0 0 auto",
+      borderRadius: CR_RADIUS_S, overflow: "hidden", background: CR_FILL2,
+      border: CR_LINE_W + " solid " + CR_LINE, display: "grid", placeItems: "center"
+    }
+  },
+    h("span", { style: { color: CR_DIM, fontSize: CR_T_SM } }, crInitials(props.v.name || "?")),
+    crImgAnchor(props.cardId, crVariantSlot(props.v), "fit=cover,collapse=1",
+      { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block" })
+  );
+}
+
+// [CR-SETS] Profile > Brains: the card's sets, edited account-wide. Which variant is active is the story's.
+function CrBrainSetsEditor(props: { card: CrAnyCard; kind: CrCardKind; mobile: boolean }) : any
+{
+  const card = props.card;
+  const sets: CrBrainSet[] = JSON.parse(JSON.stringify(crCardSets(card)));
+  const commit = () => { crSetCardSets(card, props.kind, sets).catch(() => {}); };
+  const word = props.kind === "scenario" ? "Location" : "Outfit";
+  const rowStyle: any = {
+    border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
+    padding: CR_S_4, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3
+  };
+  return h(CrSection, {
+    title: "Sets",
+    note: "A set is several versions of one brain with exactly one in use — places for a Scenario, outfits for a "
+      + "Contact or User. The one in use is sent as a brain named after the set, and its image prompt joins every "
+      + "picture made of this card. Which one is in use belongs to each story and is switched on Chat > Brains; "
+      + "undo takes a switch back."
+  }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_4 } },
+    sets.length === 0 ? h(CrEmpty, { text: "No sets on this card." }) : null,
+    sets.map((s, si) => {
+      const active = crSetActiveVariant(s);
+      return h("div", { key: s.id, style: Object.assign({}, rowStyle, { gap: CR_S_4 }) },
+        h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center", flexWrap: "wrap" } },
+          h("div", { style: { flex: "1 1 160px", minWidth: "0" } },
+            h(CrTextInput, { value: s.name, placeholder: "Set name, e.g. " + word,
+              onSet: (v: string) => { sets[si].name = v.slice(0, 80); commit(); } })),
+          h(CrButton, { text: "Remove set", icon: "", onClick: () => { sets.splice(si, 1); commit(); } })
+        ),
+        props.kind === "scenario" ? h(CrChoice, {
+          label: "Stage backdrop",
+          hint: "On: the variant in use replaces the Banner behind the Stage. Give each variant a picture first.",
+          options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }],
+          active: s.stage ? "on" : "off",
+          onPick: (id: string) => { sets[si].stage = id === "on" ? true : undefined; commit(); }
+        }) : null,
+        s.variants.map((v, vi) => h("div", { key: v.id, style: rowStyle },
+          h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center", flexWrap: "wrap" } },
+            h(CrVariantThumb, { cardId: card.id, v: v, size: 44 }),
+            h("div", { style: { flex: "1 1 140px", minWidth: "0" } },
+              h(CrTextInput, { value: v.name, placeholder: word + " name",
+                onSet: (x: string) => { sets[si].variants[vi].name = x.slice(0, 80); commit(); } })),
+            (active && active.id === v.id)
+              ? h(CrPill, { text: "in use here", tone: "accent" })
+              : h(CrButton, { text: "Use in this story", icon: "", onClick: () => { crPickVariant(s.id, v.id).catch(() => {}); } }),
+            h(CrButton, { text: "Remove", icon: "", onClick: () => { sets[si].variants.splice(vi, 1); commit(); } })
+          ),
+          h(CrTextArea, { value: v.content, placeholder: "What the model should know while this is the one in use.",
+            rows: props.mobile ? 4 : 3,
+            onSet: (x: string) => { sets[si].variants[vi].content = x.slice(0, 4000); commit(); } }),
+          h(CrField, { label: "Image prompt", hint: "Joins every picture of this card while in use." },
+            h(CrTextInput, { value: v.prompt || "", placeholder: props.kind === "scenario" ? "harbour at night, wet cobbles, lanterns" : "black leather jacket, ripped jeans",
+              onSet: (x: string) => { sets[si].variants[vi].prompt = x.slice(0, 600) || undefined; commit(); } })),
+          h(CrField, { label: "Image undesired" },
+            h(CrTextInput, { value: v.uc || "", placeholder: "",
+              onSet: (x: string) => { sets[si].variants[vi].uc = x.slice(0, 600) || undefined; commit(); } })),
+          h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+            h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(card.id, crVariantSlot(v)).catch(() => {}); } }),
+            h(CrButton, { text: "Generate picture", icon: "", onClick: () => { crGenerateVariantImage(card, props.kind, s, v).catch(() => {}); } }))
+        )),
+        h(CrButton, {
+          text: "Add a " + word.toLowerCase(), icon: "",
+          disabled: s.variants.length >= CR_VARIANT_MAX,
+          onClick: () => { sets[si].variants.push({ id: crShortId("v"), name: "", content: "" }); commit(); }
+        })
+      );
+    }),
+    h(CrButton, {
+      text: "Add a set", icon: "",
+      disabled: sets.length >= CR_SET_MAX,
+      onClick: () => {
+        sets.push({ id: crShortId("s"), name: word, variants: [{ id: crShortId("v"), name: "", content: "" }] });
+        commit();
+      }
+    })
+  ));
+}
+
+function crBrainPreview(text: string) : string
+{
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  return t.length > 110 ? t.slice(0, 108) + "…" : t;
+}
+
+function CrBrainSwitchRow(props: { name: string; detail: string; state: string; tone: string; off: boolean; onToggle: () => void }) : any
+{
+  return h("div", {
+    style: { display: "flex", gap: CR_S_3, alignItems: "flex-start", padding: CR_S_2 + " 0",
+             borderTop: CR_LINE_W + " solid " + CR_LINE, opacity: props.off ? "0.62" : "1" }
+  },
+    h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
+      h("div", { style: { color: CR_HEAD, fontSize: CR_T_BASE, fontWeight: "600" } }, props.name || "Unnamed"),
+      props.detail ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } }, props.detail) : null
+    ),
+    h(CrPill, { text: props.state, tone: props.tone }),
+    h(CrButton, { text: props.off ? "Restore" : "Suppress", icon: "", onClick: props.onToggle })
+  );
+}
+
+function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string; mobile: boolean; readsConditional: boolean }) : any
+{
+  const card = props.card;
+  const live: any = crCardById(card.id) || card;
+  const sets = crCardSets(live);
+  const brains: BrainEntry[] = live.brains || [];
+  const conds: BrainComplexConditional[] = live.brainsConditional || [];
+  const fired = crBrainsFired[card.id];
+  const rows: any[] = [];
+  sets.forEach((s) => {
+    const off = crSetIsOff(card.id, s);
+    const v = crSetActiveVariant(s);
+    rows.push(h("div", { key: "s" + s.id, style: { padding: CR_S_2 + " 0", borderTop: CR_LINE_W + " solid " + CR_LINE, opacity: off ? "0.62" : "1" } },
+      h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center" } },
+        v ? h(CrVariantThumb, { cardId: card.id, v: v, size: 36 }) : null,
+        h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
+          h("div", { style: { color: CR_HEAD, fontSize: CR_T_BASE, fontWeight: "600" } }, (s.name || "Set") + (v ? ": " + (v.name || "Unnamed") : "")),
+          h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, v ? crBrainPreview(v.content) || "No brain text." : "No variants yet.")
+        ),
+        h(CrPill, { text: off ? "suppressed" : "in context", tone: off ? "" : "accent" }),
+        h(CrButton, { text: off ? "Restore" : "Suppress", icon: "", onClick: () => { crSetBrainOff(card.id, "s:" + s.id, !off).catch(() => {}); } })
+      ),
+      s.variants.length > 1 ? h("div", { style: { marginTop: CR_S_2 } }, h(CrChoice, {
+        options: s.variants.map((x) => ({ id: x.id, label: x.name || "Unnamed" })),
+        active: v ? v.id : "",
+        onPick: (id: string) => { crPickVariant(s.id, id).catch(() => {}); }
+      })) : null
+    ));
+  });
+  brains.forEach((b, i) => {
+    const off = crBrainIsOff(card.id, "b:" + b.name);
+    rows.push(h(CrBrainSwitchRow, {
+      key: "b" + i, name: b.name, detail: crBrainPreview(b.content), off: off,
+      state: off ? "suppressed" : "in context", tone: off ? "" : "accent",
+      onToggle: () => { crSetBrainOff(card.id, "b:" + b.name, !off).catch(() => {}); }
+    }));
+  });
+  conds.forEach((c, i) => {
+    const off = crBrainIsOff(card.id, "c:" + c.name);
+    let state = "waiting";
+    let tone = "";
+    if (off){ state = "suppressed"; }
+    else if (!props.readsConditional){ state = "not read"; }
+    else if (c.requiredIntimacy && c.requiredIntimacy !== "none" && c.requiredIntimacy !== chatSettings.intimacy){ state = "needs " + c.requiredIntimacy; }
+    else if (fired && fired.names.indexOf(c.name) >= 0){ state = "fired last build"; tone = "accent"; }
+    rows.push(h(CrBrainSwitchRow, {
+      key: "c" + i, name: c.name, off: off, state: state, tone: tone,
+      detail: "Keys: " + ((c.keys || []).join(", ") || "none") + "  ·  " + crBrainPreview(c.content),
+      onToggle: () => { crSetBrainOff(card.id, "c:" + c.name, !off).catch(() => {}); }
+    }));
+  });
+  return h(CrSection, {
+    title: (card.name || "Unnamed") + "  ·  " + props.role,
+    note: (!props.readsConditional && conds.length)
+      ? "AnotherRoom reads conditional brains from the speaking Contact only, so this card's conditional entries never reach the model."
+      : undefined
+  },
+    h("div", { style: { marginTop: CR_S_2 } },
+      rows.length ? rows : h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "No brains on this card."),
+      h("div", { style: { marginTop: CR_S_3 } },
+        h(CrButton, { text: "Edit brains", icon: "", onClick: () => crOpenCardFromChat(props.kind, card.id, "brains") }))
+    )
+  );
+}
+
+// [CR-SETS] Chat > Brains: every brain this chat can send, its state, and a switch.
+function CrChatBrainsTab(props: { mobile: boolean }) : any
+{
+  const contact = crLiveContact();
+  const user = crLiveUser();
+  const scenario = crLiveScenario();
+  if (!contact || !user){
+    return h(CrEmpty, { text: "Pair a Contact and a User on the Chat tab first." });
+  }
+  const members = crGroupMembers();
+  const fired = crBrainsFired[contact.id];
+  return h("div", { class: "cr-chat-brains" },
+    h(CrSection, {
+      title: "Brains in this chat",
+      note: "Suppress takes a brain out of this story's context without touching the card; Restore puts it back. "
+        + "A set sends the one version in use. Conditional entries show what the last build did with them."
+    }, fired ? h("div", { style: { marginTop: CR_S_2, color: CR_DIM, fontSize: CR_T_SM } },
+        "Last build " + crReportAgo(fired.at) + ".") : null),
+    h(CrBrainsOwner, { card: contact, kind: "contact", role: "Contact", mobile: props.mobile, readsConditional: true }),
+    h(CrBrainsOwner, { card: user, kind: "user", role: "User", mobile: props.mobile, readsConditional: false }),
+    scenario ? h(CrBrainsOwner, { card: scenario, kind: "scenario", role: "Scenario", mobile: props.mobile, readsConditional: false }) : null,
+    members.map((m) => h(CrBrainsOwner, { key: m.id, card: m, kind: "contact", role: "Group member, read when they speak", mobile: props.mobile, readsConditional: true })),
+    h(CrSection, {
+      title: "Floaty brains",
+      note: "This story's floaty brains, the same switches as the CR Brains panel."
+    }, h("div", { style: { marginTop: CR_S_2 } },
+      floatyBrainsList.length ? floatyBrainsList.map((b) => h(CrBrainSwitchRow, {
+        key: b.id, name: b.entry.name, detail: crBrainPreview(b.entry.content), off: !b.active,
+        state: b.active ? "on" : "off", tone: b.active ? "accent" : "",
+        onToggle: () => { crFloatySetActive(b.id, !b.active).catch(() => {}); }
+      })) : h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "None in this story.")
+    ))
+  );
 }
 
 // ============================================================================
@@ -6697,6 +7276,398 @@ function CrCardRow(props: { name: string; handle: string; blurb: string; avatar?
   return h(CrPressable, { render: body });
 }
 
+// [CR-FOLDERS] Card lists: folders the author names, search, sort, rows or a grid of faces.
+// Folders live account-level and never on the card, so an export does not carry the owner's filing.
+const CR_FOLDERS_KEY = "cr.cardFolders";
+const CR_FOLDER_MAX = 40;
+const CR_FOLDER_NAME_MAX = 40;
+const CR_FOLDER_NONE = "__none";
+const CR_FOLDER_NEW = "__new";
+
+interface CrFolderRec {
+  v: number;
+  names: Record<CrCardKind, string[]>;
+  of: Record<string, string>;
+  layout: string;
+  sort: string;
+}
+
+function crSanitizeFolders(v: any) : CrFolderRec
+{
+  const out: CrFolderRec = { v: 1, names: { contact: [], user: [], scenario: [] }, of: {}, layout: "rows", sort: "added" };
+  if (!v || typeof v !== "object"){
+    return out;
+  }
+  const kinds: CrCardKind[] = ["contact", "user", "scenario"];
+  for (let k = 0; k < kinds.length; k++){
+    const raw: any[] = (v.names && Array.isArray(v.names[kinds[k]])) ? v.names[kinds[k]] : [];
+    const seen: string[] = [];
+    for (let i = 0; i < raw.length && seen.length < CR_FOLDER_MAX; i++){
+      const n = typeof raw[i] === "string" ? raw[i].trim().slice(0, CR_FOLDER_NAME_MAX) : "";
+      if (n && n !== CR_FOLDER_NONE && n !== CR_FOLDER_NEW && seen.indexOf(n) < 0){
+        seen.push(n);
+      }
+    }
+    out.names[kinds[k]] = seen;
+  }
+  if (v.of && typeof v.of === "object"){
+    const ids = Object.keys(v.of);
+    for (let i = 0; i < ids.length; i++){
+      const n = typeof v.of[ids[i]] === "string" ? v.of[ids[i]] : "";
+      if (n){
+        out.of[ids[i].slice(0, 200)] = n.slice(0, CR_FOLDER_NAME_MAX);
+      }
+    }
+  }
+  out.layout = v.layout === "grid" ? "grid" : "rows";
+  out.sort = (v.sort === "name" || v.sort === "newest") ? v.sort : "added";
+  return out;
+}
+
+let crFolders: CrFolderRec = crSanitizeFolders(await api.v1.storage.get(CR_FOLDERS_KEY));
+const crListFilter: Record<string, string> = {};
+const crFolderShut: Record<string, boolean> = {};
+const crListOrganise: Record<string, boolean> = {};
+
+async function crSaveFolders() : Promise<void>
+{
+  const live: Record<string, boolean> = {};
+  charList.forEach((c) => { live[c.id] = true; });
+  userList.forEach((u) => { live[u.id] = true; });
+  scenarioList.forEach((s) => { live[s.id] = true; });
+  const ids = Object.keys(crFolders.of);
+  for (let i = 0; i < ids.length; i++){
+    if (!live[ids[i]]){
+      delete crFolders.of[ids[i]];
+    }
+  }
+  try{ await api.v1.storage.set(CR_FOLDERS_KEY, crFolders); }
+  catch (e){ api.v1.error("[CR:folders] could not store the folders:", e); }
+  crTouch();
+}
+
+function crFolderOf(kind: CrCardKind, id: string) : string
+{
+  const n = crFolders.of[id] || "";
+  return (n && crFolders.names[kind].indexOf(n) >= 0) ? n : "";
+}
+
+async function crFolderAdd(kind: CrCardKind, name: string) : Promise<string>
+{
+  const n = String(name || "").trim().slice(0, CR_FOLDER_NAME_MAX);
+  if (!n || n === CR_FOLDER_NONE || n === CR_FOLDER_NEW){
+    return "";
+  }
+  if (crFolders.names[kind].indexOf(n) < 0){
+    if (crFolders.names[kind].length >= CR_FOLDER_MAX){
+      try{ await api.v1.ui.toast("That is as many folders as a list can hold.", { type: "warning" }); }
+      catch (e){}
+      return "";
+    }
+    crFolders.names[kind].push(n);
+  }
+  await crSaveFolders();
+  return n;
+}
+
+async function crFolderRename(kind: CrCardKind, from: string, to: string) : Promise<void>
+{
+  const n = String(to || "").trim().slice(0, CR_FOLDER_NAME_MAX);
+  const at = crFolders.names[kind].indexOf(from);
+  if (!n || at < 0 || n === from || n === CR_FOLDER_NONE || n === CR_FOLDER_NEW){
+    return;
+  }
+  if (crFolders.names[kind].indexOf(n) >= 0){
+    crFolders.names[kind].splice(at, 1);
+  }
+  else {
+    crFolders.names[kind][at] = n;
+  }
+  const ids = Object.keys(crFolders.of);
+  for (let i = 0; i < ids.length; i++){
+    if (crFolders.of[ids[i]] === from){
+      crFolders.of[ids[i]] = n;
+    }
+  }
+  await crSaveFolders();
+}
+
+async function crFolderRemove(kind: CrCardKind, name: string) : Promise<void>
+{
+  const at = crFolders.names[kind].indexOf(name);
+  if (at < 0){
+    return;
+  }
+  crFolders.names[kind].splice(at, 1);
+  const ids = Object.keys(crFolders.of);
+  for (let i = 0; i < ids.length; i++){
+    if (crFolders.of[ids[i]] === name){
+      delete crFolders.of[ids[i]];
+    }
+  }
+  await crSaveFolders();
+}
+
+async function crFolderMove(id: string, name: string) : Promise<void>
+{
+  if (name){
+    crFolders.of[id] = name;
+  }
+  else {
+    delete crFolders.of[id];
+  }
+  await crSaveFolders();
+}
+
+async function crSetListLook(patch: { layout?: string; sort?: string }) : Promise<void>
+{
+  if (patch.layout){ crFolders.layout = patch.layout === "grid" ? "grid" : "rows"; }
+  if (patch.sort){ crFolders.sort = (patch.sort === "name" || patch.sort === "newest") ? patch.sort : "added"; }
+  await crSaveFolders();
+}
+
+function crCardLabel(card: CrAnyCard) : string
+{
+  const a: any = card;
+  return String(a.alias || a.name || "Unnamed");
+}
+
+type CrFolderGroup = { name: string; cards: CrAnyCard[] };
+
+// Folders A–Z, then Unfiled. A search hides empty groups; without one a new folder shows empty.
+function crFolderGroups(kind: CrCardKind, cards: CrAnyCard[], listId: string) : CrFolderGroup[]
+{
+  const q = String(crListFilter[listId] || "").trim().toLowerCase();
+  let list = cards.filter((c) => {
+    if (!q){ return true; }
+    const a: any = c;
+    return [a.name, a.alias, a.description].some((t) => t && String(t).toLowerCase().indexOf(q) >= 0);
+  });
+  if (crFolders.sort === "name"){
+    list = list.slice().sort((x, y) => crCardLabel(x).toLowerCase().localeCompare(crCardLabel(y).toLowerCase()));
+  }
+  else if (crFolders.sort === "newest"){
+    list = list.slice().reverse();
+  }
+  const names = crFolders.names[kind].slice().sort((x, y) => x.toLowerCase().localeCompare(y.toLowerCase()));
+  const groups: CrFolderGroup[] = names.map((n) => ({ name: n, cards: [] as CrAnyCard[] }));
+  const loose: CrAnyCard[] = [];
+  for (let i = 0; i < list.length; i++){
+    const f = crFolderOf(kind, list[i].id);
+    const g = f ? groups.find((x) => x.name === f) : undefined;
+    if (g){ g.cards.push(list[i]); }
+    else { loose.push(list[i]); }
+  }
+  const out = groups.filter((g) => !q || g.cards.length > 0);
+  if (loose.length || (!out.length && !q)){
+    out.push({ name: "", cards: loose });
+  }
+  return out;
+}
+
+let crNameSheetTitle = "";
+let crNameSheetHint = "";
+let crNameSheetDraft = "";
+let crNameSheetApply: ((v: string) => void) | null = null;
+let crNameSheetHandle: any = null;
+
+async function crOpenNameSheet(title: string, hint: string, initial: string, apply: (v: string) => void) : Promise<void>
+{
+  crNameSheetTitle = title;
+  crNameSheetHint = hint;
+  crNameSheetDraft = initial || "";
+  crNameSheetApply = apply;
+  try{ crNameSheetHandle = await crJsxModal(title, "small", () => CrNameSheet()); }
+  catch (e){ api.v1.error("[CR:folders] name sheet failed:", e); }
+}
+
+async function crCloseNameSheet() : Promise<void>
+{
+  if (crNameSheetHandle){
+    try{ await crNameSheetHandle.close(); }
+    catch (e){}
+    crNameSheetHandle = null;
+  }
+  crNameSheetApply = null;
+  crTouch();
+}
+
+function CrNameSheet() : any
+{
+  const save = () => {
+    const v = crNameSheetDraft.trim();
+    const apply = crNameSheetApply;
+    crCloseNameSheet().catch(() => {});
+    if (v && apply){ apply(v); }
+  };
+  return h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+    h(CrField, { label: crNameSheetTitle, hint: crNameSheetHint },
+      h(CrTextInput, { value: crNameSheetDraft, placeholder: "Name", onSet: (v: string) => { crNameSheetDraft = v; } })),
+    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+      h(CrButton, { text: "Save", primary: true, icon: "", onClick: save }),
+      h(CrButton, { text: "Cancel", icon: "", onClick: () => { crCloseNameSheet().catch(() => {}); } }))
+  );
+}
+
+async function crPickFolderFor(kind: CrCardKind, card: CrAnyCard) : Promise<void>
+{
+  const opts = [{ id: CR_FOLDER_NONE, label: "Unfiled" }]
+    .concat(crFolders.names[kind].map((n) => ({ id: n, label: n })))
+    .concat([{ id: CR_FOLDER_NEW, label: "New folder…" }]);
+  const cur = crFolderOf(kind, card.id) || CR_FOLDER_NONE;
+  await crOpenPickSheet("Folder for " + crCardLabel(card), "Only this list's folders are offered.", opts, cur, (id: string) => {
+    if (id === CR_FOLDER_NEW){
+      crOpenNameSheet("New folder", "Folders are yours alone: they stay on this account and never go out with an exported card.", "", (name: string) => {
+        crFolderAdd(kind, name).then((n) => n ? crFolderMove(card.id, n) : undefined).catch(() => {});
+      }).catch(() => {});
+      return;
+    }
+    crFolderMove(card.id, id === CR_FOLDER_NONE ? "" : id).catch(() => {});
+  });
+}
+
+function CrListTools(props: { kind: CrCardKind; listId: string; organise?: boolean }) : any
+{
+  const org = crListOrganise[props.listId] === true;
+  return h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, marginBottom: CR_S_4 } },
+    h(CrTextInput, {
+      value: crListFilter[props.listId] || "",
+      placeholder: "Search by name",
+      onSet: (v: string) => { crListFilter[props.listId] = v; crTouch(); }
+    }),
+    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
+      h(CrChoice, {
+        options: [{ id: "added", label: "Oldest" }, { id: "newest", label: "Newest" }, { id: "name", label: "A–Z" }],
+        active: crFolders.sort,
+        onPick: (id: string) => { crSetListLook({ sort: id }).catch(() => {}); }
+      }),
+      h(CrChoice, {
+        options: [{ id: "rows", label: "Rows" }, { id: "grid", label: "Grid" }],
+        active: crFolders.layout,
+        onPick: (id: string) => { crSetListLook({ layout: id }).catch(() => {}); }
+      }),
+      h(CrButton, {
+        text: "New folder", icon: "",
+        onClick: () => {
+          crOpenNameSheet("New folder", "Folders are yours alone: they stay on this account and never go out with an exported card.", "",
+            (name: string) => { crFolderAdd(props.kind, name).catch(() => {}); }).catch(() => {});
+        }
+      }),
+      props.organise ? h(CrButton, {
+        text: org ? "Done organising" : "Organise", icon: "", primary: org,
+        title: org ? "Tapping a card opens it again" : "Tap a card to choose its folder",
+        onClick: () => { crListOrganise[props.listId] = !org; crTouch(); }
+      }) : null
+    ),
+    org ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "Tap a card to choose its folder.") : null
+  );
+}
+
+function CrCardTile(props: { card: CrAnyCard; slot?: string; active?: boolean; onTap: () => void }) : any
+{
+  const c: any = props.card;
+  const name = crCardLabel(props.card);
+  return h(CrPressable, {
+    render: (hover: boolean, press: boolean, handlers: any) => h("div", Object.assign({
+      class: "cr-card-tile",
+      title: name,
+      onClick: props.onTap,
+      style: {
+        display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_1, cursor: "pointer", minWidth: "0",
+        transform: press ? "translateY(1px)" : "none", transition: CR_MOTION
+      }
+    }, handlers),
+      h("div", {
+        style: {
+          position: "relative", aspectRatio: "1 / 1", width: "100%", overflow: "hidden", borderRadius: CR_RADIUS_S,
+          display: "grid", placeItems: "center", background: CR_FILL2,
+          border: (props.active ? "2px" : CR_LINE_W) + " solid " + ((props.active || hover) ? CR_ACCENT : CR_LINE)
+        }
+      },
+        (c.avatar && String(c.avatar).indexOf("data:") === 0)
+          ? h("img", { src: c.avatar, alt: name, style: { position: "absolute", inset: "0", width: "100%", height: "100%", objectFit: "cover", display: "block" } })
+          : h("span", { style: { color: CR_DIM, fontWeight: "600", fontSize: CR_T_LG } }, crInitials(name)),
+        crImgAnchor(c.id, props.slot || CR_SLOT_AVATAR, "fit=cover,shrink=1",
+          { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block" })
+      ),
+      h("div", {
+        style: { color: props.active ? CR_ACCENT : CR_HEAD, fontSize: CR_T_SM, fontWeight: "600", textAlign: "center",
+                 overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
+      }, name)
+    )
+  });
+}
+
+// One list, grouped by folder, in rows or a grid. `row` draws a card in row layout.
+function CrCardList(props: {
+  kind: CrCardKind; cards: CrAnyCard[]; listId: string; mobile: boolean; slot?: string;
+  empty: string; row: (card: CrAnyCard) => any; onTap: (card: CrAnyCard) => void;
+  isActive?: (card: CrAnyCard) => boolean;
+}) : any
+{
+  if (!props.cards.length){
+    return h(CrEmpty, { text: props.empty });
+  }
+  const org = crListOrganise[props.listId] === true;
+  const tap = (card: CrAnyCard) => {
+    if (org){ crPickFolderFor(props.kind, card).catch(() => {}); }
+    else { props.onTap(card); }
+  };
+  const grid = crFolders.layout === "grid";
+  const groups = crFolderGroups(props.kind, props.cards, props.listId);
+  if (!groups.length){
+    return h(CrEmpty, { text: "Nothing matches that search." });
+  }
+  const onlyLoose = groups.length === 1 && groups[0].name === "";
+  return h("div", null, groups.map((g) => {
+    const shutKey = props.listId + "|" + g.name;
+    const shut = crFolderShut[shutKey] === true;
+    const body = !g.cards.length
+      ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, padding: "4px 0 10px" } }, "Empty.")
+      : (grid
+        ? h("div", {
+            style: { display: "grid", gap: CR_S_3, marginBottom: CR_S_3,
+                     gridTemplateColumns: "repeat(auto-fill, minmax(" + (props.mobile ? "76px" : "92px") + ", 1fr))" }
+          }, g.cards.map((c) => h(CrCardTile, {
+            key: c.id, card: c, slot: props.slot, onTap: () => tap(c),
+            active: props.isActive ? props.isActive(c) : false
+          })))
+        : h("div", null, g.cards.map((c) => props.row(c))));
+    if (onlyLoose){
+      return h("div", { key: "loose" }, body);
+    }
+    return h("div", { key: "f:" + g.name, class: "cr-folder" },
+      h("div", {
+        style: { display: "flex", alignItems: "center", gap: CR_S_2,
+                 borderBottom: CR_LINE_W + " solid " + CR_LINE, paddingBottom: CR_S_1, marginBottom: CR_S_3, marginTop: CR_S_2 }
+      },
+        h(CrPressable, {
+          render: (hover: boolean, press: boolean, handlers: any) => h("div", Object.assign({
+            style: { flex: "1 1 auto", minWidth: "0", display: "flex", alignItems: "center", gap: CR_S_2, cursor: "pointer",
+                     color: hover ? CR_ACCENT : CR_HEAD, fontSize: CR_T_BASE, fontWeight: "600" },
+            onClick: () => { crFolderShut[shutKey] = !shut; crTouch(); }
+          }, handlers),
+            h("span", { style: { color: CR_DIM, width: "1em" } }, shut ? "▸" : "▾"),
+            h("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, g.name || "Unfiled"),
+            h("span", { style: { color: CR_DIM, fontWeight: "400", fontSize: CR_T_SM } }, String(g.cards.length)))
+        }),
+        g.name ? h(CrButton, {
+          text: "Rename", icon: "",
+          onClick: () => {
+            crOpenNameSheet("Rename folder", "", g.name, (v: string) => { crFolderRename(props.kind, g.name, v).catch(() => {}); }).catch(() => {});
+          }
+        }) : null,
+        g.name ? h(CrButton, {
+          text: "Remove", icon: "",
+          title: "The folder goes; its cards move to Unfiled",
+          onClick: () => { crFolderRemove(props.kind, g.name).catch(() => {}); }
+        }) : null
+      ),
+      shut ? null : body
+    );
+  }));
+}
+
 function CrCardsSurface(props: { st: CrUiState }) : any
 {
   const tab = props.st.cardTab;
@@ -6706,71 +7677,45 @@ function CrCardsSurface(props: { st: CrUiState }) : any
     { id: "users", label: "Users (" + userList.length + ")" },
     { id: "scenarios", label: "Scenarios (" + scenarioList.length + ")" }
   ];
-  let body: any;
-  if (tab === "users"){
-    body = h("div", null,
-      h("div", { style: { display: "flex", gap: CR_S_3, flexWrap: "wrap", marginBottom: CR_S_4 } },
-        h(CrButton, {
-          text: "New User", primary: true,
-          onClick: () => { crNewUser().catch(() => {}); }
-        }),
-        h(CrButton, {
-          text: "Import",
-          onClick: () => { importUser("fileInput").catch(() => {}); }
-        })
-      ),
-      userList.length === 0
-        ? h(CrEmpty, { text: "No Users yet." })
-        : userList.map((u) => h(CrCardRow, {
-            key: u.id, name: u.name || "Unnamed", handle: "",
-            blurb: u.description || u.persona || "", charId: u.id, mobile: mob,
-            onOpen: () => crNav({ openContactId: u.id, openKind: "user", profileTab: "about" })
-          }))
-    );
-  }
-  else if (tab === "scenarios"){
-    body = h("div", null,
-      h("div", { style: { display: "flex", gap: CR_S_3, flexWrap: "wrap", marginBottom: CR_S_4 } },
-        h(CrButton, {
-          text: "New Scenario", primary: true,
-          onClick: () => { crNewScenario().catch(() => {}); }
-        }),
-        h(CrButton, {
-          text: "Import",
-          onClick: () => { importScenario("fileInput").catch(() => {}); }
-        })
-      ),
-      scenarioList.length === 0
-        ? h(CrEmpty, { text: "No Scenarios yet." })
-        : scenarioList.map((s) => h(CrCardRow, {
-            key: s.id, name: s.name || "Unnamed", handle: "",
-            blurb: s.description || "", mobile: mob,
-            charId: s.id, slot: CR_SLOT_BANNER,
-            onOpen: () => crNav({ openContactId: s.id, openKind: "scenario", profileTab: "about" })
-          }))
-    );
-  }
-  else {
-    body = h("div", null,
-      h("div", { style: { display: "flex", gap: CR_S_3, flexWrap: "wrap", marginBottom: CR_S_4 } },
-        h(CrButton, {
-          text: "New Contact", primary: true,
-          onClick: () => { crNewContact().catch(() => {}); }
-        }),
-        h(CrButton, {
-          text: "Import",
-          onClick: () => { importCharacter("fileInput").catch(() => {}); }
-        })
-      ),
-      charList.length === 0
-        ? h(CrEmpty, { text: "No Contacts yet." })
-        : charList.map((c) => h(CrCardRow, {
-            key: c.id, name: c.name || "Unnamed", handle: c.alias ? "@" + c.alias : "",
-            blurb: c.description || c.persona || "", avatar: c.avatar, charId: c.id, mobile: mob,
-            onOpen: () => crNav({ openContactId: c.id, openKind: "contact", profileTab: "posts" })
-          }))
-    );
-  }
+  const kind: CrCardKind = tab === "users" ? "user" : (tab === "scenarios" ? "scenario" : "contact");
+  const listId = "cards:" + kind;
+  const newBtn = kind === "user"
+    ? h(CrButton, { text: "New User", primary: true, onClick: () => { crNewUser().catch(() => {}); } })
+    : (kind === "scenario"
+      ? h(CrButton, { text: "New Scenario", primary: true, onClick: () => { crNewScenario().catch(() => {}); } })
+      : h(CrButton, { text: "New Contact", primary: true, onClick: () => { crNewContact().catch(() => {}); } }));
+  const importBtn = h(CrButton, {
+    text: "Import",
+    onClick: () => {
+      const run = kind === "user" ? importUser : (kind === "scenario" ? importScenario : importCharacter);
+      run("fileInput").catch(() => {});
+    }
+  });
+  const open = (card: CrAnyCard) => crNav({ openContactId: card.id, openKind: kind, profileTab: kind === "contact" ? "posts" : "about" });
+  const cards: CrAnyCard[] = kind === "user" ? userList : (kind === "scenario" ? scenarioList : charList);
+  const row = (card: CrAnyCard) => {
+    const c: any = card;
+    const blurb = kind === "scenario" ? (c.description || "") : (c.description || c.persona || "");
+    return h(CrCardRow, {
+      key: c.id, name: c.name || "Unnamed", handle: (kind === "contact" && c.alias) ? "@" + c.alias : "",
+      blurb: blurb, avatar: kind === "contact" ? c.avatar : undefined, charId: c.id, mobile: mob,
+      slot: kind === "scenario" ? CR_SLOT_BANNER : undefined,
+      onOpen: () => {
+        if (crListOrganise[listId] === true){ crPickFolderFor(kind, card).catch(() => {}); }
+        else { open(card); }
+      }
+    });
+  };
+  const body = h("div", null,
+    h("div", { style: { display: "flex", gap: CR_S_3, flexWrap: "wrap", marginBottom: CR_S_4 } }, newBtn, importBtn),
+    cards.length ? h(CrListTools, { kind: kind, listId: listId, organise: true }) : null,
+    h(CrCardList, {
+      kind: kind, cards: cards, listId: listId, mobile: mob,
+      slot: kind === "scenario" ? CR_SLOT_BANNER : undefined,
+      empty: kind === "user" ? "No Users yet." : (kind === "scenario" ? "No Scenarios yet." : "No Contacts yet."),
+      row: row, onTap: open
+    })
+  );
   return h("div", { class: "cr-surface cr-surface-cards" },
     h(CrTabs, { tabs: tabs, active: tab, mobile: mob, onPick: (id: string) => crNav({ cardTab: id }) }),
     h("div", { style: { padding: "14px 0 0 0" } }, body)
@@ -8903,7 +9848,8 @@ function CrBrainsTab(props: { card: CrAnyCard; kind: CrCardKind; mobile: boolean
           commitCond();
         }
       })
-    ))
+    )),
+    h(CrBrainSetsEditor, { card: card, kind: props.kind, mobile: mob })
   );
 }
 
@@ -9961,50 +10907,35 @@ function CrPickRow(props: { name: string; sub: string; avatar?: string; charId?:
 function CrCardPickSheet() : any
 {
   const kind = crCardPickKind;
-  const rows: any[] = [];
-  if (kind === "contact"){
-    const cur = chatSettings.char ? chatSettings.char.id : "";
-    for (const char of charList){
-      rows.push(h(CrPickRow, {
-        key: char.id,
-        name: char.alias || char.name,
-        sub: char.description || char.persona || "",
-        avatar: char.avatar,
-        charId: char.id,
-        active: char.id === cur,
-        onPick: () => { crPairContact(char).catch(() => {}); crCloseCardPicker().catch(() => {}); }
-      }));
-    }
-  }
-  else if (kind === "user"){
-    const cur = chatSettings.user ? chatSettings.user.id : "";
-    for (const user of userList){
-      rows.push(h(CrPickRow, {
-        key: user.id,
-        name: user.name,
-        sub: user.description || user.persona || "",
-        charId: user.id,
-        active: user.id === cur,
-        onPick: () => { crPairUser(user).catch(() => {}); crCloseCardPicker().catch(() => {}); }
-      }));
-    }
-  }
-  else{
-    const cur = chatSettings.scenario ? chatSettings.scenario.id : "";
-    for (const scenario of scenarioList){
-      rows.push(h(CrPickRow, {
-        key: scenario.id,
-        name: scenario.name,
-        sub: scenario.environment || scenario.description || "",
-        charId: scenario.id,
-        active: scenario.id === cur,
-        onPick: () => { crPairScenario(scenario).catch(() => {}); crCloseCardPicker().catch(() => {}); }
-      }));
-    }
-  }
+  const listId = "pick:" + kind;
+  const cards: CrAnyCard[] = kind === "user" ? userList : (kind === "scenario" ? scenarioList : charList);
+  const cur = kind === "user" ? (chatSettings.user ? chatSettings.user.id : "")
+    : (kind === "scenario" ? (chatSettings.scenario ? chatSettings.scenario.id : "") : (chatSettings.char ? chatSettings.char.id : ""));
+  const pick = (card: CrAnyCard) => {
+    if (kind === "user"){ crPairUser(card as User).catch(() => {}); }
+    else if (kind === "scenario"){ crPairScenario(card as Scenario).catch(() => {}); }
+    else { crPairContact(card as Character).catch(() => {}); }
+    crCloseCardPicker().catch(() => {});
+  };
+  const row = (card: CrAnyCard) => {
+    const c: any = card;
+    return h("div", { key: c.id, style: { marginBottom: CR_S_2 } }, h(CrPickRow, {
+      name: kind === "contact" ? (c.alias || c.name) : c.name,
+      sub: kind === "scenario" ? (c.environment || c.description || "") : (c.description || c.persona || ""),
+      avatar: kind === "contact" ? c.avatar : undefined,
+      charId: c.id,
+      active: c.id === cur,
+      onPick: () => pick(card)
+    }));
+  };
   return h("div", { class: "cr-card-pick-sheet", style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
-    rows.length ? h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2 } }, rows)
-      : h(CrEmpty, { text: "No cards of this kind yet. Make one on the Cards screen." }),
+    cards.length > 6 ? h(CrListTools, { kind: kind, listId: listId, organise: false }) : null,
+    h(CrCardList, {
+      kind: kind, cards: cards, listId: listId, mobile: true,
+      slot: kind === "scenario" ? CR_SLOT_BANNER : undefined,
+      empty: "No cards of this kind yet. Make one on the Cards screen.",
+      row: row, onTap: pick, isActive: (c: CrAnyCard) => c.id === cur
+    }),
     h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_2 } },
       h(CrButton, {
         text: "Unpair",
@@ -10232,14 +11163,14 @@ function CrPairRow(props: {
 }
 
 // [CR-CHATNAV] From Chat > Chat straight to a card's profile.
-function crOpenCardFromChat(kind: CrCardKind, id: string) : void
+function crOpenCardFromChat(kind: CrCardKind, id: string, profileTab?: string) : void
 {
   if (!id){
     return;
   }
   const tab = kind === "user" ? "users" : (kind === "scenario" ? "scenarios" : "contacts");
   crNav({ surface: "cards", cardTab: tab, openContactId: id, openKind: kind,
-          profileTab: kind === "contact" ? "posts" : "about" });
+          profileTab: profileTab || (kind === "contact" ? "posts" : "about") });
 }
 
 // [CR-CHATNAV]
@@ -10441,9 +11372,9 @@ function CrGreetingPanel() : any
 
 function CrChatSurface(props: { mobile: boolean; tab: string }) : any
 {
-  const tab = (props.tab === "stage" || props.tab === "group") ? props.tab : "chat";
+  const tab = (props.tab === "stage" || props.tab === "group" || props.tab === "brains") ? props.tab : "chat";
   const strip = h(CrTabs, {
-    tabs: [{ id: "chat", label: "Chat" }, { id: "stage", label: "Stage" }, { id: "group", label: "Group" }],
+    tabs: [{ id: "chat", label: "Chat" }, { id: "brains", label: "Brains" }, { id: "stage", label: "Stage" }, { id: "group", label: "Group" }],
     active: tab, mobile: props.mobile,
     onPick: (id: string) => crNav({ chatTab: id })
   });
@@ -10454,6 +11385,12 @@ function CrChatSurface(props: { mobile: boolean; tab: string }) : any
     },
       h("div", { style: { padding: "0 8px", background: CR_RAIL } }, strip),
       h(CrStageSurface, { mobile: props.mobile })
+    );
+  }
+  if (tab === "brains"){
+    return h("div", { class: "cr-surface cr-surface-chat cr-surface-brains" },
+      h("div", { style: { marginBottom: CR_S_4 } }, strip),
+      h(CrChatBrainsTab, { mobile: props.mobile })
     );
   }
   if (tab === "group"){
@@ -11746,7 +12683,7 @@ async function crSetSlotTag(char: Character, slot: string, tag: string) : Promis
 
 type CrCastCard = Character | User;
 
-function crAssembleCharacterPrompt(char: CrCastCard, purpose: "avatar" | "illustrate") : { visuals: string; uc: string }
+function crAssembleCharacterPrompt(char: CrCastCard, purpose: "avatar" | "illustrate", only?: { setId: string; variantId: string }) : { visuals: string; uc: string }
 {
   const card: CrImgCard = (char.cr && char.cr.img) ? char.cr.img : {};
   const vis: string[] = [];
@@ -11775,6 +12712,10 @@ function crAssembleCharacterPrompt(char: CrCastCard, purpose: "avatar" | "illust
     if (outfits[i].prompt){ vis.push(outfits[i].prompt); }
     if (outfits[i].uc){ uc.push(outfits[i].uc); }
   }
+
+  const setPairs = crSetImagePairs(char, only);
+  vis.push(...setPairs.prompt);
+  uc.push(...setPairs.uc);
 
   return {
     visuals: vis.filter((p) => p && p.trim()).join(", "),
@@ -11822,9 +12763,10 @@ function crSceneBasePrompt() : { base: string; uc: string }
 {
   const scenario = crLiveScenario();
   const card: CrSceneCard = (scenario && scenario.cr && scenario.cr.img) ? scenario.cr.img : {};
+  const pairs = crSetImagePairs(scenario);
   return {
-    base: (card.basePrompt || "").trim(),
-    uc: (card.baseUC || "").trim()
+    base: [(card.basePrompt || "").trim()].concat(pairs.prompt).filter(Boolean).join(", "),
+    uc: [(card.baseUC || "").trim()].concat(pairs.uc).filter(Boolean).join(", ")
   };
 }
 
@@ -15825,13 +16767,23 @@ function CrGroupTab(props: { mobile: boolean }) : any
       + "toolbar, and answers through a helper script. One reply at a time: a press while another reply is "
       + "being written is turned away, not queued. Experimental."
   },
-    h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, marginTop: CR_S_3 } },
-      candidates.length ? candidates.map((c) => h(CrPickRow, {
-        key: c.id, name: c.alias || c.name, sub: c.description || c.persona || "",
-        avatar: c.avatar, charId: c.id, pill: "in group",
-        active: crGroup.members.indexOf(c.id) >= 0,
-        onPick: () => { crGroupToggleMember(c.id).catch(() => {}); }
-      })) : h(CrEmpty, { text: "There is no other Contact to add yet." })
+    h("div", { style: { marginTop: CR_S_3 } },
+      candidates.length > 6 ? h(CrListTools, { kind: "contact", listId: "group", organise: false }) : null,
+      h(CrCardList, {
+        kind: "contact", cards: candidates, listId: "group", mobile: props.mobile,
+        empty: "There is no other Contact to add yet.",
+        isActive: (c: CrAnyCard) => crGroup.members.indexOf(c.id) >= 0,
+        onTap: (c: CrAnyCard) => { crGroupToggleMember(c.id).catch(() => {}); },
+        row: (card: CrAnyCard) => {
+          const c = card as Character;
+          return h("div", { key: c.id, style: { marginBottom: CR_S_2 } }, h(CrPickRow, {
+            name: c.alias || c.name, sub: c.description || c.persona || "",
+            avatar: c.avatar, charId: c.id, pill: "in group",
+            active: crGroup.members.indexOf(c.id) >= 0,
+            onPick: () => { crGroupToggleMember(c.id).catch(() => {}); }
+          }));
+        }
+      })
     )
   );
   return h("div", { class: "cr-group" },
@@ -19599,7 +20551,7 @@ function CrStageSurface(props: { mobile: boolean }) : any
     + (o.bgPos === "bottom" ? ",pos=bottom" : "") + ",collapse=1";
 
   const scene = h("div", { class: "cr-stage-scene", style: sceneStyle },
-    scenario ? crImgAnchor(scenario.id, CR_SLOT_BANNER, bgOpts,
+    scenario ? crImgAnchor(scenario.id, crStageBackdropSlot(scenario), bgOpts,
       { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block" }) : null,
     h("div", {
       class: "cr-stage-cast",
