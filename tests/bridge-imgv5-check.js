@@ -25,6 +25,9 @@ let pass = 0, fail = 0; const ok = (n, c, g) => { if (c) { pass++; console.log('
   ok('CR path: subject first, quality last', b.input === '1girl, 1boy, port, very aesthetic', b.input);
   ok('CR path: centers and use_coords', b.parameters.v4_prompt.use_coords === true && b.parameters.v4_prompt.caption.char_captions[1].centers[0].x === 0.7 && b.parameters.v4_negative_prompt.caption.char_captions[0].centers[0].x === 0.3, b.parameters.v4_prompt);
   ok('CR path: site fields', b.parameters.cfg_rescale === 0 && b.parameters.prefer_brownian === true && b.parameters.cfg_sched_eligibility === 'enable_for_post_summer_samplers' && b.parameters.v4_negative_prompt.use_order === false && b.parameters.v4_prompt.legacy_uc === false && b.parameters.skip_cfg_above_sigma === null, b.parameters);
+  await f.generateCommentImage({ uuid: 'u', prompt: '1girl', extraBaseVisuals: 'port', characters: [], settings: Object.assign({}, CR, { qualityStart: 'artist:x', qualityMid: 'flat color' }) });
+  b = calls.pop();
+  ok('spots: start, scene, after-scene, base, end', b.input === 'artist:x, 1girl, flat color, port, very aesthetic', b.input);
   failFirst = true; calls = [];
   await f.generateCommentImage({ uuid: 'u', prompt: 'x', extraBaseVisuals: '', characters: [], settings: CR });
   ok('CR path: a 400 retries once without the site fields', calls.length === 2 && calls[0].parameters.cfg_rescale === 0 && calls[1].parameters.cfg_rescale === undefined, calls.map((c) => c.parameters.cfg_rescale));
