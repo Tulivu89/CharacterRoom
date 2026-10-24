@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.8
+version: 1.0.9
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.8. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.9. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -41,7 +41,8 @@ SECTIONS (search "SECTION <NAME>")
   HOOKS-MISC  onGenerationEnd, onHistoryNavigated
   K-CONTEXT   onBeforeContextBuild and onContextBuilt, adapters over K
   CR-DATA     CR-only card fields and import sanitizers
-  CR-SETS     brain sets (one variant in use), per-chat brain switches, Chat > Brains
+  CR-SETS     brain sets (one variant in use; Clothes sets replace the old image outfits), per-chat brain
+              switches, Chat > Brains
   CR-BUBBLE   chat bubble look: record, resolver, the message segmenter, shaped markers
   CR-UI       shell window, tokens, surfaces, editor portraits, report; Chat > Chat opens cards and lists the group;
               card lists with folders, search, sort and a grid [CR-FOLDERS]
@@ -4917,6 +4918,7 @@ interface CrBrainSet {
   name: string;
   variants: CrSetVariant[];
   stage?: boolean;
+  wear?: boolean;      // clothes: a scene's "@Name wears:" replaces this set's image prompt
 }
 
 interface CrImgCard {
@@ -4929,7 +4931,6 @@ interface CrImgCard {
   avatarPrompt?: string;
   avatarUC?: string;
   avatarSeed?: number;
-  outfits?: CrOutfitChunk[];
   handle?: string;
 }
 
@@ -5152,10 +5153,6 @@ function crSanitizeImgCard(v: any) : CrImgCard | undefined
   if (isFinite(seed) && seed > 0 && seed <= 4294967295){
     out.avatarSeed = seed;
   }
-  const outfits = crSanitizeOutfits((v as any).outfits);
-  if (outfits){
-    out.outfits = outfits;
-  }
   const handle = crSanitizeText((v as any).handle, 60);
   if (handle){
     out.handle = handle;
@@ -5211,7 +5208,7 @@ function crSanitizeUserExtra(v: any) : CrUserExtra | undefined
   if (profile){
     out.profile = profile;
   }
-  const sets = crSanitizeSets((v as any).sets);
+  const sets = crOutfitsToSet((v as any).img ? (v as any).img.outfits : undefined, crSanitizeSets((v as any).sets));
   if (sets){
     out.sets = sets;
   }
@@ -5390,7 +5387,7 @@ function crSanitizeContactExtra(v: any) : CrContactExtra | undefined
   if (bubbles){
     out.bubbles = bubbles;
   }
-  const sets = crSanitizeSets((v as any).sets);
+  const sets = crOutfitsToSet((v as any).img ? (v as any).img.outfits : undefined, crSanitizeSets((v as any).sets));
   if (sets){
     out.sets = sets;
   }
@@ -5412,6 +5409,58 @@ const CR_BRAINS_OFF_KEY = "cr.brainsOff";
 function crShortId(prefix: string) : string
 {
   return prefix + api.v1.uuid().replace(/-/g, "").slice(0, 8);
+}
+
+// [CR-SETS] The Images tab's old outfit layers become one "Outfit" set marked as clothes (D-114). The outfits
+// that were on come first, joined as one "Worn" version when several were, so the picture is unchanged; with
+// none on, a bare "None" version leads. Image-only: the versions carry no brain text.
+const CR_OUTFIT_SET_ID = "sOutfits";
+
+function crOutfitsToSet(rawOutfits: any, sets: CrBrainSet[] | undefined) : CrBrainSet[] | undefined
+{
+  const outfits = crSanitizeOutfits(rawOutfits);
+  if (!outfits || !outfits.length){
+    return sets;
+  }
+  const list = (sets || []).slice();
+  if (list.some((x) => x.id === CR_OUTFIT_SET_ID) || list.length >= CR_SET_MAX){
+    return sets;
+  }
+  const on = outfits.filter((o) => o.active);
+  const vars: CrSetVariant[] = [];
+  const pair = (v: CrSetVariant, prompt: string, uc: string) : CrSetVariant => {
+    if (prompt.trim()){ v.prompt = prompt.slice(0, 600); }
+    if (uc.trim()){ v.uc = uc.slice(0, 600); }
+    return v;
+  };
+  if (on.length > 1){
+    vars.push(pair({ id: "oWorn", name: "Worn", content: "" },
+      on.map((o) => o.prompt).filter(Boolean).join(", "), on.map((o) => o.uc).filter(Boolean).join(", ")));
+  }
+  else if (on.length === 0){
+    vars.push({ id: "oNone", name: "None", content: "" });
+  }
+  const ordered = on.concat(outfits.filter((o) => !o.active));
+  for (let i = 0; i < ordered.length && vars.length < CR_VARIANT_MAX; i++){
+    vars.push(pair({ id: "o" + (i + 1), name: ordered[i].label || ("Outfit " + (i + 1)), content: "" },
+      ordered[i].prompt || "", ordered[i].uc || ""));
+  }
+  list.push({ id: CR_OUTFIT_SET_ID, name: "Outfit", variants: vars, wear: true });
+  return list;
+}
+
+// Cards stored before 1.0.9 still carry img.outfits; convert them once at load. True when any changed.
+function crMigrateOutfits(list: any[], user: boolean) : boolean
+{
+  let changed = false;
+  for (let i = 0; i < (list || []).length; i++){
+    const c = list[i];
+    if (c && c.cr && c.cr.img && Array.isArray(c.cr.img.outfits)){
+      c.cr = user ? crSanitizeUserExtra(c.cr) : crSanitizeContactExtra(c.cr);
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function crSanitizeSets(v: any) : CrBrainSet[] | undefined
@@ -5450,6 +5499,7 @@ function crSanitizeSets(v: any) : CrBrainSet[] | undefined
     }
     const set: CrBrainSet = { id: sid, name: crSanitizeText(raw.name, 80) || "", variants: vars };
     if (raw.stage === true){ set.stage = true; }
+    if (raw.wear === true){ set.wear = true; }
     out.push(set);
   }
   return out.length > 0 ? out : undefined;
@@ -5566,10 +5616,14 @@ function crBrainView(card: any) : any
   return copy;
 }
 
-// The active variants' image pairs, for whichever card they belong to.
-function crSetImagePairs(card: CrAnyCard | undefined, only?: { setId: string; variantId: string }) : { prompt: string[]; uc: string[] }
+// The active variants' image pairs, for whichever card they belong to. only: draw one variant (a preview);
+// picks: this picture's own choice per set; skipWear: leave clothes sets out (the scene says what they wear).
+type CrSetPairOpts = { only?: { setId: string; variantId: string }; picks?: Record<string, string>; skipWear?: boolean };
+
+function crSetImagePairs(card: CrAnyCard | undefined, opts?: CrSetPairOpts) : { prompt: string[]; uc: string[] }
 {
   const out = { prompt: [] as string[], uc: [] as string[] };
+  const o: CrSetPairOpts = opts || {};
   if (!card){
     return out;
   }
@@ -5577,8 +5631,14 @@ function crSetImagePairs(card: CrAnyCard | undefined, only?: { setId: string; va
   for (let i = 0; i < sets.length; i++){
     const s = sets[i];
     let v: CrSetVariant | undefined;
-    if (only && only.setId === s.id){
-      v = s.variants.find((x) => x.id === only.variantId);
+    if (o.skipWear && s.wear){
+      continue;
+    }
+    if (o.only && o.only.setId === s.id){
+      v = s.variants.find((x) => x.id === o.only!.variantId);
+    }
+    else if (o.picks && o.picks[s.id] && s.variants.some((x) => x.id === o.picks![s.id])){
+      v = s.variants.find((x) => x.id === o.picks![s.id]);
     }
     else if (crSetIsOff(card.id, s)){
       continue;
@@ -5793,6 +5853,13 @@ function CrBrainSetsEditor(props: { card: CrAnyCard; kind: CrCardKind; mobile: b
               onSet: (v: string) => { sets[si].name = v.slice(0, 80); commit(); } })),
           h(CrButton, { text: "Remove set", icon: "", onClick: () => { sets.splice(si, 1); commit(); } })
         ),
+        props.kind !== "scenario" ? h(CrChoice, {
+          label: "Clothes",
+          hint: "On: this set is what they wear, so a picture whose scene changes their clothes (an @Name wears: line) leaves it out.",
+          options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }],
+          active: s.wear ? "on" : "off",
+          onPick: (id: string) => { sets[si].wear = id === "on" ? true : undefined; commit(); }
+        }) : null,
         props.kind === "scenario" ? h(CrChoice, {
           label: "Stage backdrop",
           hint: "On: the variant in use replaces the Banner behind the Stage. Give each variant a picture first.",
@@ -5835,7 +5902,9 @@ function CrBrainSetsEditor(props: { card: CrAnyCard; kind: CrCardKind; mobile: b
       text: "Add a set", icon: "",
       disabled: sets.length >= CR_SET_MAX,
       onClick: () => {
-        sets.push({ id: crShortId("s"), name: word, variants: [{ id: crShortId("v"), name: "", content: "" }] });
+        const fresh: CrBrainSet = { id: crShortId("s"), name: word, variants: [{ id: crShortId("v"), name: "", content: "" }] };
+        if (props.kind !== "scenario"){ fresh.wear = true; }
+        sets.push(fresh);
         commit();
       }
     })
@@ -8551,24 +8620,11 @@ async function crSetBannerSeed(scenario: Scenario, seed: number) : Promise<void>
   crTouch();
 }
 
-async function crSetOutfits(char: CrCastCard, outfits: CrOutfitChunk[]) : Promise<void>
-{
-  const extra: CrContactExtra = char.cr || {};
-  const card: any = extra.img || {};
-  card.outfits = outfits;
-  extra.img = card;
-  char.cr = crSanitizeContactExtra(extra);
-  try{ await saveCharList(); }
-  catch (e){ api.v1.error("[CR:img] could not save the outfits:", e); }
-  crTouch();
-}
-
 function CrVisualsTab(props: { char: CrCastCard }) : any
 {
   const char = props.char;
   const isUser = crIsUserCard(char);
   const card: CrImgCard = (char.cr && char.cr.img) ? char.cr.img : {};
-  const outfits: CrOutfitChunk[] = (card.outfits || []).slice();
   const set = (k: string) => (v: string) => { crSetImgCardField(char, k, v).catch(() => {}); };
   const preview = crAssembleCharacterPrompt(char, "avatar");
   const previewIll = crAssembleCharacterPrompt(char, "illustrate");
@@ -8633,47 +8689,9 @@ function CrVisualsTab(props: { char: CrCastCard }) : any
     )),
     h(CrSection, {
       title: "Outfits",
-      note: "A wardrobe to toggle rather than retype. Active outfits join the character prompt for every image."
-    }, h("div", { style: { marginTop: CR_S_3 } },
-      outfits.map((o, idx) => h("div", {
-        key: o.id,
-        style: {
-          border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
-          padding: CR_S_4, marginBottom: CR_S_3, background: o.active ? "transparent" : CR_SUNK
-        }
-      },
-        h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center", marginBottom: CR_S_3, flexWrap: "wrap" } },
-          h("div", { style: { flex: "1 1 120px", minWidth: "0" } },
-            h(CrTextInput, {
-              value: o.label,
-              placeholder: "Outfit name",
-              onSet: (v: string) => { outfits[idx].label = v; crSetOutfits(char, outfits).catch(() => {}); }
-            })
-          ),
-          h(CrButton, {
-            text: o.active ? "Worn" : "Off", primary: o.active,
-            onClick: () => { outfits[idx].active = !outfits[idx].active; crSetOutfits(char, outfits).catch(() => {}); }
-          }),
-          h(CrButton, {
-            text: "Remove",
-            onClick: () => { outfits.splice(idx, 1); crSetOutfits(char, outfits).catch(() => {}); }
-          })
-        ),
-        h(CrPromptPair, {
-          label: "", prompt: o.prompt, uc: o.uc,
-          onPrompt: (v: string) => { outfits[idx].prompt = v; crSetOutfits(char, outfits).catch(() => {}); },
-          onUC: (v: string) => { outfits[idx].uc = v; crSetOutfits(char, outfits).catch(() => {}); }
-        })
-      )),
-      h(CrButton, {
-        text: "Add an outfit",
-        disabled: outfits.length >= 16,
-        onClick: () => {
-          outfits.push({ id: "cr-o" + Date.now(), label: "New outfit", prompt: "", uc: "", active: false });
-          crSetOutfits(char, outfits).catch(() => {});
-        }
-      })
-    )),
+      note: "Outfits are sets now: on the Brains tab, Add a set with Clothes on and give each version an image prompt. "
+        + "The one in use joins every picture, Chat > Brains switches it for the story, and Illustrate can swap it for one picture."
+    }),
     h(CrSection, {
       title: "What gets sent",
       note: "The character prompt as assembled now, before the account's chunks and the slot's own tag are added."
@@ -13045,9 +13063,10 @@ async function crSetSlotTag(char: Character, slot: string, tag: string) : Promis
 type CrCastCard = Character | User;
 
 // [CR-IMGV5] Identity, then this image's state, then what they wear, then their sets. mods.wears replaces the
-// active outfits (and their UC) for one image; mods.hides drops card tags the framing cannot show; mods.only
+// clothes sets (and their UC) for one image; mods.hides drops card tags the framing cannot show; mods.only
 // draws one set variant. A call without mods is unchanged.
-type CrCaptionMods = { state?: string; wears?: string; hides?: string[]; only?: { setId: string; variantId: string } };
+type CrCaptionMods = { state?: string; wears?: string; hides?: string[]; only?: { setId: string; variantId: string };
+                       picks?: Record<string, string> };
 
 function crAssembleCharacterPrompt(char: CrCastCard, purpose: "avatar" | "illustrate", mods?: CrCaptionMods) : { visuals: string; uc: string }
 {
@@ -13072,21 +13091,12 @@ function crAssembleCharacterPrompt(char: CrCastCard, purpose: "avatar" | "illust
     if (card.illustratorUC){ uc.push(card.illustratorUC); }
   }
 
-  if (m.wears && m.wears.trim()){
-    dress.push(m.wears.trim());
-  }
-  else {
-    const outfits = card.outfits || [];
-    for (let i = 0; i < outfits.length; i++){
-      if (!outfits[i].active){
-        continue;
-      }
-      if (outfits[i].prompt){ dress.push(outfits[i].prompt); }
-      if (outfits[i].uc){ uc.push(outfits[i].uc); }
-    }
+  const wears = !!(m.wears && m.wears.trim());
+  if (wears){
+    dress.push((m.wears as string).trim());
   }
 
-  const setPairs = crSetImagePairs(char, m.only);
+  const setPairs = crSetImagePairs(char, { only: m.only, picks: m.picks, skipWear: wears });
   uc.push(...setPairs.uc);
 
   const hides = m.hides || [];
@@ -13860,8 +13870,10 @@ function crHasTag(tags: string[], tag: string) : boolean
   return tags.some((t) => crTagKey(t) === tag);
 }
 
-function crBuildScene(parsed: CrSceneParsed, cast: CrCastCard[], extraNames?: string[]) : CrSceneBuilt
+function crBuildScene(parsed: CrSceneParsed, cast: CrCastCard[], extraNames?: string[],
+                      picks?: Record<string, Record<string, string>>) : CrSceneBuilt
 {
+  const pickFor = (id: string) => (picks && picks[id]) ? picks[id] : undefined;
   const legacy = parsed.people.length === 0 && !parsed.noHumans;
   const built: CrSceneBuilt = { prompt: "", characters: [], extraUC: [], visibleIds: [], legacy: legacy };
   const people: CrScenePerson[] = legacy
@@ -13872,7 +13884,7 @@ function crBuildScene(parsed: CrSceneParsed, cast: CrCastCard[], extraNames?: st
 
   const cardKeys: Record<string, boolean> = {};
   people.forEach((p) => {
-    crSplitTags(crAssembleCharacterPrompt(p.card, "illustrate").visuals)
+    crSplitTags(crAssembleCharacterPrompt(p.card, "illustrate", { picks: pickFor(p.card.id) }).visuals)
       .forEach((t) => { cardKeys[crTagKey(t)] = true; });
   });
   let tags = split.tags.filter((t) => !cardKeys[crTagKey(t)]);
@@ -13903,8 +13915,9 @@ function crBuildScene(parsed: CrSceneParsed, cast: CrCastCard[], extraNames?: st
     const stateTags = crSplitTags(p.state);
     const eyesClosed = crHasTag(stateTags, "closed eyes") || crHasTag(stateTags, "sleeping") ||
                        (solo && sceneEyesClosed);
-    const cardTags = crSplitTags(crAssembleCharacterPrompt(p.card, "illustrate", { wears: p.wears }).visuals);
+    const cardTags = crSplitTags(crAssembleCharacterPrompt(p.card, "illustrate", { wears: p.wears, picks: pickFor(p.card.id) }).visuals);
     const a = crAssembleCharacterPrompt(p.card, "illustrate", {
+      picks: pickFor(p.card.id),
       state: solo ? "" : p.state,
       wears: p.wears,
       hides: p.hides.concat(crFrameHidden(cardTags, framing, eyesClosed))
@@ -13982,11 +13995,13 @@ type CrIllusState = {
   lastUuid: string;
   lastAt: number;
   note: string;
+  picks: Record<string, Record<string, string>>;
+  showSent: boolean;
 };
 
 let crIllus: CrIllusState = {
   tab: "compose", prompt: "", cast: [], scanning: false, enhancing: false,
-  generating: false, lastUuid: "", lastAt: 0, note: ""
+  generating: false, lastUuid: "", lastAt: 0, note: "", picks: {}, showSent: false
 };
 
 function crIllusCastChars() : CrCastCard[]
@@ -14007,6 +14022,7 @@ function crIllusToggle(id: string)
   const at = crIllus.cast.indexOf(id);
   if (at >= 0){
     crIllus.cast.splice(at, 1);
+    delete crIllus.picks[id];
   }
   else if (crIllus.cast.length < CR_ILLUS_MAX_CAST){
     crIllus.cast.push(id);
@@ -14033,7 +14049,45 @@ function crIllusBuild(cast: CrCastCard[]) : CrSceneBuilt
       }
     }
   }
-  return crBuildScene(parsed, cast, crSceneExtraNames(cast));
+  return crBuildScene(parsed, cast, crSceneExtraNames(cast), crIllus.picks);
+}
+
+// One picture's choice of a set version; picking the chat's own version clears the override.
+function crIllusPick(cardId: string, setId: string, variantId: string) : void
+{
+  const card = crCardById(cardId);
+  const set = crCardSets(card).find((x) => x.id === setId);
+  const chatV = set ? crSetActiveVariant(set) : undefined;
+  const mine: Record<string, string> = crIllus.picks[cardId] || {};
+  if (chatV && chatV.id === variantId){
+    delete mine[setId];
+  }
+  else {
+    mine[setId] = variantId;
+  }
+  if (Object.keys(mine).length){ crIllus.picks[cardId] = mine; }
+  else { delete crIllus.picks[cardId]; }
+  crTouch();
+}
+
+// The Scenario's base and each drawn person's card base, as Generate sends them.
+function crIllusBase(cast: CrCastCard[], built: CrSceneBuilt) : { base: string; uc: string }
+{
+  const baseBits: string[] = [];
+  const baseUCBits: string[] = [];
+  const scene = crSceneBasePrompt();
+  if (scene.base){ baseBits.push(scene.base); }
+  if (scene.uc){ baseUCBits.push(scene.uc); }
+  for (let i = 0; i < cast.length; i++){
+    if (built.visibleIds.indexOf(cast[i].id) < 0){
+      continue;
+    }
+    const base = crAssembleBasePrompt(cast[i], "illustrate");
+    if (base.base){ baseBits.push(base.base); }
+    if (base.uc){ baseUCBits.push(base.uc); }
+  }
+  baseUCBits.push.apply(baseUCBits, built.extraUC);
+  return { base: baseBits.join(", "), uc: baseUCBits.join(", ") };
 }
 
 // A POV shot with no @ lines shows nobody from the cast: the one holding the phone gets no @ line.
@@ -14152,26 +14206,13 @@ async function crIllusGenerate() : Promise<void>
     const cast = crIllusCastChars();
     const built = crIllusBuild(cast);
     const compiled = crCompileImgFields();
-    const baseBits: string[] = [];
-    const baseUCBits: string[] = [];
-    const scene = crSceneBasePrompt();
-    if (scene.base){ baseBits.push(scene.base); }
-    if (scene.uc){ baseUCBits.push(scene.uc); }
-    for (let i = 0; i < cast.length; i++){
-      if (built.visibleIds.indexOf(cast[i].id) < 0){
-        continue;
-      }
-      const base = crAssembleBasePrompt(cast[i], "illustrate");
-      if (base.base){ baseBits.push(base.base); }
-      if (base.uc){ baseUCBits.push(base.uc); }
-    }
-    baseUCBits.push.apply(baseUCBits, built.extraUC);
+    const base = crIllusBase(cast, built);
     const uuid = "cr-illus-" + Date.now();
     await crImgSend({
       uuid: uuid,
       prompt: built.prompt,
-      extraBaseVisuals: baseBits.join(", "),
-      extraBaseUC: baseUCBits.join(", "),
+      extraBaseVisuals: base.base,
+      extraBaseUC: base.uc,
       characters: built.characters,
       settings: {
         model: crImgSettings.model,
@@ -14205,8 +14246,33 @@ function CrIllusComposer(props: { st: CrUiState }) : any
   const cast = crIllusCastChars();
   const built = crIllusBuild(cast);
   const compiled = crCompileImgFields();
+  const base = crIllusBase(cast, built);
   const scene = crSceneBasePrompt();
   const liveScenario = crLiveScenario();
+  const dim = { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" };
+
+  // Each picked person's sets with more than one version: this picture's choice, the chat's by default.
+  const pickRows: any[] = [];
+  cast.forEach((c) => {
+    crCardSets(c).filter((x) => x.variants.length > 1).forEach((x) => {
+      const chatV = crSetActiveVariant(x);
+      const mine = crIllus.picks[c.id] ? crIllus.picks[c.id][x.id] : undefined;
+      pickRows.push(h(CrChoice, {
+        key: c.id + "|" + x.id,
+        label: (c.name || "Unnamed") + "  ·  " + (x.name || "Set") + (mine ? "  (this picture only)" : ""),
+        options: x.variants.map((v) => ({ id: v.id, label: v.name || "Unnamed" })),
+        active: mine || (chatV ? chatV.id : ""),
+        onPick: (id: string) => crIllusPick(c.id, x.id, id)
+      }));
+    });
+  });
+  const locationLine = !liveScenario
+    ? "Location: no Scenario is paired, so nothing is added."
+    : ((scene.base || scene.uc)
+        ? "Location: " + (liveScenario.name || "the Scenario") + " adds its tags (edit them on its Visuals tab)."
+        : "Location: " + (liveScenario.name || "the Scenario") + " has no scene tags yet (write them on its Visuals tab).");
+  const fullPrompt = [compiled.start, built.prompt, compiled.mid, base.base, compiled.quality].filter(Boolean).join(", ");
+  const fullUC = [compiled.negative, base.uc].filter(Boolean).join(", ");
 
   const chatCast = crChatCast();
   const castPick = (list: CrCastCard[]) => list.map((c) => {
@@ -14283,10 +14349,11 @@ function CrIllusComposer(props: { st: CrUiState }) : any
     h(CrSection, {
       title: "Who is in it",
       note: chatCast.length > 0
-        ? "Up to " + CR_ILLUS_MAX_CAST + " of this chat's people. Scan and Enhance pick the ones in view; everyone picked is drawn. Each sends its own character prompt — Universal, Illustrator, worn outfits and sets; the Avatar pair is left out of scenes."
+        ? "Up to " + CR_ILLUS_MAX_CAST + " of this chat's people. Scan and Enhance pick the ones in view; everyone picked is drawn. Each picked person's sets can be swapped for this picture without changing the chat."
         : "No Contact is paired, so every card is offered. Pair one on the Chat screen to offer just its chat."
-    }, chatCast.length > 0 ? h("div", { style: { marginTop: CR_S_3, display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
-      castPick(chatCast)
+    }, chatCast.length > 0 ? h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+      h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } }, castPick(chatCast)),
+      pickRows.length ? pickRows : null
     ) : h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
       charList.length === 0 && userList.length === 0
         ? h(CrEmpty, { text: "No cards yet." })
@@ -14302,29 +14369,6 @@ function CrIllusComposer(props: { st: CrUiState }) : any
     )),
 
     h(CrSection, {
-      title: "Location",
-      note: !liveScenario
-        ? "No Scenario is paired with this chat, so nothing is added. Pair one on the Chat screen."
-        : ((scene.base || scene.uc)
-            ? (liveScenario.name || "The Scenario") + " adds its tags to every illustration while it is the chat's. Edit them on its Visuals tab."
-            : (liveScenario.name || "The Scenario") + " is paired but has no scene tags yet — write them on its Visuals tab.")
-    }, (scene.base || scene.uc) ? h("div", {
-      style: { marginTop: CR_S_3, color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" }
-    }, scene.base || "(negative only)") : null),
-
-    crIllus.prompt.trim() ? h(CrSection, {
-      title: "What gets sent",
-      note: built.legacy
-        ? "The text has no @ lines, so everyone picked is drawn and the people count is the text's own."
-        : "Built from the @ lines: the count, who is drawn, each pose in that person's own caption, and card tags the framing hides left out."
-    }, h("div", { style: { marginTop: CR_S_3, color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" } },
-      h("div", null, "Scene: " + (built.prompt || "(empty)")),
-      built.characters.map((c, i) => h("div", { key: built.visibleIds[i] || String(i), style: { marginTop: CR_S_1 } },
-        c.name + (c.center ? " (at " + c.center.x + ")" : "") + ": " + c.visuals)),
-      built.extraUC.length ? h("div", { style: { marginTop: CR_S_1 } }, "Negative adds: " + built.extraUC.join(", ")) : null
-    )) : null,
-
-    h(CrSection, {
       title: "Generate",
       note: crIllus.note || ("Model, size and the standing prompt chunks come from Global. One press, one image.")
     }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
@@ -14334,14 +14378,25 @@ function CrIllusComposer(props: { st: CrUiState }) : any
           primary: true,
           disabled: crIllus.generating || !crBridge.ready || !crIllus.prompt.trim(),
           onClick: () => { crIllusGenerate().catch(() => {}); }
+        }),
+        h(CrButton, {
+          text: (crIllus.showSent ? "\u25be " : "\u25b8 ") + "What gets sent", icon: "",
+          onClick: () => { crIllus.showSent = !crIllus.showSent; crTouch(); }
         })
       ),
-      h("div", {
-        style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" }
-      },
-        h("div", null, "Order sent: " + crChunkOrderText(compiled)),
-        compiled.negative ? h("div", { style: { marginTop: CR_S_1 } }, "Negative: " + compiled.negative) : null
-      )
+      crIllus.showSent ? h("div", { style: dim },
+        h("div", null, locationLine),
+        crIllus.prompt.trim()
+          ? h("div", { style: { marginTop: CR_S_2 } }, built.legacy
+              ? "No @ lines, so everyone picked is drawn and the people count is the text's own."
+              : "Built from the @ lines: the count, who is drawn, each pose in that person's own caption, and card tags the framing hides left out.")
+          : null,
+        h("div", { style: { marginTop: CR_S_2, color: CR_TEXT } }, "Prompt: " + (crIllus.prompt.trim() ? fullPrompt : "(write or scan a scene first)")),
+        built.characters.map((c, i) => h("div", { key: built.visibleIds[i] || String(i), style: { marginTop: CR_S_1 } },
+          c.name + (c.center ? " (at " + c.center.x + ")" : "") + ": " + c.visuals + (c.uc ? "  —  negative: " + c.uc : ""))),
+        h("div", { style: { marginTop: CR_S_2 } }, "Negative: " + (fullUC || "(none)")),
+        h("div", { style: { marginTop: CR_S_1 } }, "Order: " + crChunkOrderText(compiled))
+      ) : null
     )),
 
     crIllus.lastUuid ? h(CrSection, { title: "Last image" },
@@ -21637,6 +21692,10 @@ function createUserTemplate(): User {
 let userList: User[] = [];
 await api.v1.storage.setIfAbsent(USER_LIST_KEY, userList);
 userList = await api.v1.storage.get(USER_LIST_KEY);
+try{
+  if (crMigrateOutfits(userList, true)){ await api.v1.storage.set(USER_LIST_KEY, userList); }
+}
+catch (e){ api.v1.error("[CR:sets] could not move the Users' outfits into sets:", e); }
 
 async function saveUserList()
 {
@@ -21724,6 +21783,10 @@ function createCharTemplate(): Character {
 let charList: Character[] = [];
 await api.v1.storage.setIfAbsent(CHARACTER_LIST_KEY, charList);
 charList = await api.v1.storage.get(CHARACTER_LIST_KEY);
+try{
+  if (crMigrateOutfits(charList, false)){ await api.v1.storage.set(CHARACTER_LIST_KEY, charList); }
+}
+catch (e){ api.v1.error("[CR:sets] could not move the Contacts' outfits into sets:", e); }
 
 async function saveCharList()
 {
