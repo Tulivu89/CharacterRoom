@@ -1,6 +1,6 @@
 # CharacterRoom — Plan & Inventory (CR-PLAN)
 
-**Doc version** 0.82 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
+**Doc version** 0.83 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
 the last three are the random-name tables · **Target artifacts** `characterroom-vX.naiscript`
 (engine, LF) and the **shared bridge** — CE's bridge extended to serve both engines (D-15)
 
@@ -51,6 +51,7 @@ the last three are the random-name tables · **Target artifacts** `characterroom
 | D-25 | **CR 0.0.x ships AnotherRoom's UI under CR names** with the kernel inside. The JSX shell replaces those doors in P4. | Every build is importable and complete; nothing waits on the shell to be usable. |
 | D-21 | **Editor portraits are painted by the bridge** (was O-10). | The mechanism exists live today in CE's STORYIMG path: the engine creates a **node widget** holding a 1px transparent **sentinel text** (`ce-storyimg:<id>`); the bridge finds it with a TreeWalker, re-scans on a debounced MutationObserver, climbs a bounded number of ancestors to the widget's own box, and paints there. CR's avatar uses the same channel with the older CharChat sentinel `ce-chatava:` — the bridge still parses `id\|emotion` and still has `_ccavFindSentinels`, `_ccavContainerFor` and `_ccavSettings`; only `_ccavPaintOne` is gone and is rebuilt on `_ceStoryImgRender`'s pattern. No image bytes cross into the worker. §6.8. |
 | D-22 | **Display options: account default, per-Contact override** (was O-11). | Stored on the Contact card as `display?`; resolved by one function (§6.8). |
+| D-119 | **A set's version in use resolves itself: pinned, else by schedule, else by relationship, else the first** (Home step 1, §6.12). A pick on Chat > Brains pins it for the story (`cr.setActive`, undo rewinds it); **Auto** unpins. A Contact's schedule event can name a version per set — its own sets and the paired Scenario's — in the event sheet's **While this is on** (`cr.schedLinks` on the Contact, keyed by event id, never inside AR's `ScheduleEvent`). A version can list the relationship levels it is for (**Use at**, `intimacy` on the variant). The schedule read is `crStatusRead` on the chat clock, so an event held back by intimacy links nothing and sets agree with Current Events and the status line. **The chat clock rules Home too** — real or story, one setting. **Built in engine 1.0.10.** | Author: schedules should choose locations, and schedule and relationship should choose outfits; one clock for everything. With no pin, no link and no level marked, the result is the first version, exactly as before, so parity holds (20/20, mutation 19/19); the new behaviour is pinned in `cr-brains-smoke.js` (16 new cases), as D-107's was, since AnotherRoom has no sets to oracle it. A Scenario's or User's set follows the **paired** Contact's schedule; per-speaker resolution waits for D-118 (step 2). |
 | D-118 | **In Home, a speaker is told only their own room and who is in it with them; who replies stays the author's choice.** The Scenario's Location set resolves per speaker to that speaker's room, plus one line naming those present (the User counted where the camera put them). Member buttons and native Send are unchanged. **Design only** (§6.12, O-19); lands with step 2 and a parity fixture. | Author's call, closing 0.81's open question. Per-speaker resolution fits the group path, which already builds each speaker's context on its own; the paired Contact on native Send gets the same treatment, so nobody "knows" a room they are not in. |
 | D-117 | **Home's rooms take any shape, positions are fractions, and the camera follows the paired Contact.** A room's Home picture keeps its own ratio (the bridge's `--ce-img-ar`); anchors are x of width and y of height, a figure's size a fraction of the room's width, placed by tap-tap, mouse drag over a grid, or X/Y/Scale sliders. Home shows the paired Contact's room; the author can look at another room or drop in, which pins the chat's Location set to that room until **Follow**. **Design only** (§6.12, O-19). | Author's call, answering 0.80's question. Fractions of each axis make the square requirement unnecessary: nothing is measured, the box simply carries the picture's ratio. The camera rule keeps the chat's Location honest: by default it is where the Contact is, and it becomes where the User is only when the author drops in. |
 | D-116 | **Plan-only changes go straight to `main`;** engine and test changes still go through a branch and a PR. The plan lives only in the repo; the project copy under `claude/` is a convenience snapshot. | Author's call. Closes D-105's worry about the plan being out of step between accounts: whoever works on the plan pushes it to the one place. |
@@ -1137,7 +1138,7 @@ slot — an aerial prompt per place (from above, isometric room).
 The chat goes on as before and Home reads and writes the same state, so dropping in for a chat never leaves
 anything behind. It is built in four steps, and the first is worth having with no Home at all.
 
-#### Step 1 — sets that choose themselves (useful to the chat on its own)
+#### Step 1 — sets that choose themselves (useful to the chat on its own) — **built, engine 1.0.10 (D-119)**
 
 A set's version in use stops being only a manual pick. It is resolved, in this order:
 
@@ -1226,8 +1227,8 @@ buttons (D-85) and native Send work as now, whoever is in whichever room. Built 
 kernel is fed per speaker (the group path already assembles each speaker's context separately, `crGroupAssemble`),
 so it lands with a parity fixture.
 
-**Open**: real or story clock
-for Home (D-08; leaning: the chat's own clock, so one setting rules both). What a catch-up costs with a group. Whether
+**Clock**: the chat's own (D-119) — real or story, one setting rules the chat, the schedule, the sets and Home.
+**Open**: what a catch-up costs with a group. Whether
 the first open of a story may run one catch-up unasked (D-40 says no unattended generation; the replay is free, the
 narration is a press).
 
@@ -1395,6 +1396,8 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ---
 
 ## 10. Changelog
+
+- **0.83** — engine 1.0.10: D-119 (Home step 1: a set's version resolves pinned > schedule > relationship > first; the chat clock rules all). `cr-brains-smoke.js` 45.
 
 - **0.82** — plan only: D-118 (each speaker knows only their room and who is in it; the author picks who replies).
 
@@ -1597,7 +1600,7 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ## 11. Handoff — next session
 
 **Start here.** Read the engine's frontmatter through CR-INDEX, the bridge's CE-INDEX, and
-§1.1/§5/§9 of this document. Current builds: **engine 1.0.9** (GitHub `Tulivu89/CharacterRoom`, the source of truth, D-105), **bridge 3.0.38** (project files of both CR and CE), **CR Persona Helper 0.0.4** (the repo carries helper scripts 0.2.0).
+§1.1/§5/§9 of this document. Current builds: **engine 1.0.10** (GitHub `Tulivu89/CharacterRoom`, the source of truth, D-105), **bridge 3.0.38** (project files of both CR and CE), **CR Persona Helper 0.0.4** (the repo carries helper scripts 0.2.0).
 **Corrected at v0.57**: this line had said engine 0.0.49 since v0.46, and the plan itself stopped at
 D-73 while the engine reached D-83; D-74–D-83 were backfilled from the CR-INDEX in this revision.
 Smart import adds `cr-import-smoke.js`, Chat navigation adds `cr-chatnav-smoke.js`, folders add `cr-folders-smoke.js`, brain sets add `cr-brains-smoke.js`, image v1.2 adds `cr-imgv5-smoke.js` (it runs the review's `cr-scene-v2.test.ts` and `cr-img-chunks.test.ts` inside the engine), group chat adds `cr-group-smoke.js` to the checks run before returning an engine patch, the Games tab adds `cr-rpg-smoke.js`, and bubbles add `cr-bubble-smoke.js`.
@@ -1796,6 +1799,8 @@ dead since v0.1 and it still cost two patches.
    Number Guess still open only from the CR Games panel.
 
 ### 11.4 Live-test items the author has not yet been able to confirm
+
+- **Sets by schedule and relationship** (1.0.10): open a Contact's schedule event and, under While this is on, pick an Outfit version and the paired Scenario's Location version. On Chat > Brains, set both sets to Auto: while the event is on (chat clock) they should read "by schedule: <event>" and the next reply should know them; move the clock past the event and they fall back. Mark an outfit version Use at your relationship level and confirm it is chosen when no event links one. Pick a version by hand — "pinned in this story" — and confirm it beats the schedule until Auto.
 
 - **Outfits as sets and Illustrate** (1.0.9): a Contact that had outfits should now have an Outfit set on its Brains tab (Clothes on), led by the outfit(s) that were worn, and its pictures should look as before. Compose: pick two people; each one's sets appear under the picker; pick another outfit, Generate, and confirm the picture wears it while Chat > Brains still shows the chat's. What gets sent is closed until tapped, and holds the location, the whole prompt and the negative.
 

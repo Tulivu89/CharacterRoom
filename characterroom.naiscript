@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.9
+version: 1.0.10
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.9. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.10. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -42,7 +42,8 @@ SECTIONS (search "SECTION <NAME>")
   K-CONTEXT   onBeforeContextBuild and onContextBuilt, adapters over K
   CR-DATA     CR-only card fields and import sanitizers
   CR-SETS     brain sets (one variant in use; Clothes sets replace the old image outfits), per-chat brain
-              switches, Chat > Brains
+              switches, Chat > Brains; the version in use resolves pinned > schedule > relationship > first
+              (crSetResolve; links in a Contact's cr.schedLinks, levels on a variant's intimacy)
   CR-BUBBLE   chat bubble look: record, resolver, the message segmenter, shaped markers
   CR-UI       shell window, tokens, surfaces, editor portraits, report; Chat > Chat opens cards and lists the group;
               card lists with folders, search, sort and a grid [CR-FOLDERS]
@@ -4911,6 +4912,7 @@ interface CrSetVariant {
   content: string;
   prompt?: string;
   uc?: string;
+  intimacy?: string[];   // relationship levels this version is for (INTIMACY_LIST)
 }
 
 interface CrBrainSet {
@@ -4973,6 +4975,7 @@ interface CrContactExtra {
   img?: CrImgCard;
   bubbles?: CrBubbleLook;
   sets?: CrBrainSet[];
+  schedLinks?: Record<string, Record<string, string>>;   // schedule event id -> set id -> version id
 }
 
 const CR_MAX_STATUS = 200;
@@ -5391,6 +5394,10 @@ function crSanitizeContactExtra(v: any) : CrContactExtra | undefined
   if (sets){
     out.sets = sets;
   }
+  const links = crSanitizeSchedLinks((v as any).schedLinks);
+  if (links){
+    out.schedLinks = links;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -5463,6 +5470,33 @@ function crMigrateOutfits(list: any[], user: boolean) : boolean
   return changed;
 }
 
+// Schedule event id -> set id -> version id. Kept beside AnotherRoom's schedule, never inside its events.
+function crSanitizeSchedLinks(v: any) : Record<string, Record<string, string>> | undefined
+{
+  if (!v || typeof v !== "object"){
+    return undefined;
+  }
+  const out: Record<string, Record<string, string>> = {};
+  const ids = Object.keys(v).slice(0, 200);
+  for (let i = 0; i < ids.length; i++){
+    const row = v[ids[i]];
+    if (!row || typeof row !== "object" || ids[i].length > 64){
+      continue;
+    }
+    const keep: Record<string, string> = {};
+    Object.keys(row).forEach((sid) => {
+      const vid = row[sid];
+      if (/^[A-Za-z0-9_-]{1,32}$/.test(sid) && typeof vid === "string" && /^[A-Za-z0-9_-]{1,32}$/.test(vid)){
+        keep[sid] = vid;
+      }
+    });
+    if (Object.keys(keep).length){
+      out[ids[i]] = keep;
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 function crSanitizeSets(v: any) : CrBrainSet[] | undefined
 {
   if (!Array.isArray(v)){
@@ -5495,6 +5529,9 @@ function crSanitizeSets(v: any) : CrBrainSet[] | undefined
       const u = crSanitizeText(r.uc, 600);
       if (p){ one.prompt = p; }
       if (u){ one.uc = u; }
+      const lv: any[] = Array.isArray(r.intimacy) ? r.intimacy : [];
+      const levels = (INTIMACY_LIST as readonly string[]).filter((x) => lv.indexOf(x) >= 0);
+      if (levels.length){ one.intimacy = levels; }
       vars.push(one);
     }
     const set: CrBrainSet = { id: sid, name: crSanitizeText(raw.name, 80) || "", variants: vars };
@@ -5563,13 +5600,67 @@ function crCardSets(card: CrAnyCard | undefined) : CrBrainSet[]
   return (live && live.cr && Array.isArray(live.cr.sets)) ? live.cr.sets : [];
 }
 
-function crSetActiveVariant(set: CrBrainSet) : CrSetVariant | undefined
+// [CR-SETS] Which version is in use, and why (D-119): pinned on Chat > Brains (the story's own pick, undo
+// rewinds it), else the one the current schedule event links, else one marked for the chat's relationship
+// level, else the first. The schedule is the set's own Contact's, or the paired Contact's for a Scenario's or a
+// User's set, read on the chat clock through crStatusRead, so it agrees with Current Events and the status line.
+type CrSetWhy = "pinned" | "schedule" | "relationship" | "default";
+type CrSetPick = { v: CrSetVariant | undefined; why: CrSetWhy; event: string };
+
+function crSchedLinksOf(char: Character | undefined) : Record<string, Record<string, string>>
+{
+  const extra: any = char ? char.cr : undefined;
+  return (extra && extra.schedLinks) ? extra.schedLinks : {};
+}
+
+function crSetScheduleCard(ownerId: string) : Character | undefined
+{
+  return charList.find((c) => c.id === ownerId) || crLiveContact();
+}
+
+function crSetResolve(set: CrBrainSet, ownerId: string, ignorePin?: boolean) : CrSetPick
 {
   if (!set.variants.length){
-    return undefined;
+    return { v: undefined, why: "default", event: "" };
   }
-  const want = crSetActive[set.id];
-  return set.variants.find((x) => x.id === want) || set.variants[0];
+  if (!ignorePin){
+    const want = crSetActive[set.id];
+    const pinned = want ? set.variants.find((x) => x.id === want) : undefined;
+    if (pinned){
+      return { v: pinned, why: "pinned", event: "" };
+    }
+  }
+  const src = crSetScheduleCard(ownerId);
+  const links = crSchedLinksOf(src);
+  if (src && Object.keys(links).length){
+    const live = crStatusRead(src).live;
+    for (let i = 0; i < live.length; i++){
+      const vid = links[live[i].id] ? links[live[i].id][set.id] : undefined;
+      const v = vid ? set.variants.find((x) => x.id === vid) : undefined;
+      if (v){
+        return { v: v, why: "schedule", event: (live[i].text || "").trim() };
+      }
+    }
+  }
+  const level = String(chatSettings.intimacy || "");
+  const byLevel = set.variants.find((x) => !!x.intimacy && x.intimacy.indexOf(level) >= 0);
+  if (byLevel){
+    return { v: byLevel, why: "relationship", event: "" };
+  }
+  return { v: set.variants[0], why: "default", event: "" };
+}
+
+function crSetActiveVariant(set: CrBrainSet, ownerId: string) : CrSetVariant | undefined
+{
+  return crSetResolve(set, ownerId).v;
+}
+
+function crSetWhyText(p: CrSetPick) : string
+{
+  if (p.why === "pinned"){ return "pinned in this story"; }
+  if (p.why === "schedule"){ return "by schedule" + (p.event ? ": " + p.event : ""); }
+  if (p.why === "relationship"){ return "by relationship (" + String(chatSettings.intimacy || "") + ")"; }
+  return "first version";
 }
 
 function crBrainIsOff(cardId: string, key: string) : boolean
@@ -5608,7 +5699,7 @@ function crBrainView(card: any) : any
       off.indexOf("c:" + b.name) < 0 && off.indexOf("a:" + b.name) < 0);
   }
   for (let i = 0; i < sets.length; i++){
-    const v = crSetActiveVariant(sets[i]);
+    const v = crSetActiveVariant(sets[i], card.id);
     if (v && v.content.trim()){
       copy.brains.push({ name: (sets[i].name || "Set") + ": " + (v.name || "Variant"), content: v.content });
     }
@@ -5644,7 +5735,7 @@ function crSetImagePairs(card: CrAnyCard | undefined, opts?: CrSetPairOpts) : { 
       continue;
     }
     else {
-      v = crSetActiveVariant(s);
+      v = crSetActiveVariant(s, card.id);
     }
     if (v && v.prompt){ out.prompt.push(v.prompt); }
     if (v && v.uc){ out.uc.push(v.uc); }
@@ -5666,7 +5757,7 @@ function crStageBackdropSlot(scenario: Scenario | undefined) : string
   const sets = crCardSets(scenario);
   for (let i = 0; i < sets.length; i++){
     if (sets[i].stage && !crSetIsOff(scenario.id, sets[i])){
-      const v = crSetActiveVariant(sets[i]);
+      const v = crSetActiveVariant(sets[i], scenario.id);
       if (v){
         return crVariantSlot(v);
       }
@@ -5678,6 +5769,15 @@ function crStageBackdropSlot(scenario: Scenario | undefined) : string
 async function crPickVariant(setId: string, variantId: string) : Promise<void>
 {
   crSetActive[setId] = variantId;
+  try{ await api.v1.historyStorage.set(CR_SETS_ACTIVE_KEY, crSetActive); }
+  catch (e){ api.v1.error("[CR:sets] could not store the active variant:", e); }
+  crTouch();
+}
+
+// Auto: drop this story's pin so schedule, relationship or the first version decides again. Undo restores it.
+async function crUnpinVariant(setId: string) : Promise<void>
+{
+  delete crSetActive[setId];
   try{ await api.v1.historyStorage.set(CR_SETS_ACTIVE_KEY, crSetActive); }
   catch (e){ api.v1.error("[CR:sets] could not store the active variant:", e); }
   crTouch();
@@ -5845,7 +5945,7 @@ function CrBrainSetsEditor(props: { card: CrAnyCard; kind: CrCardKind; mobile: b
   }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_4 } },
     sets.length === 0 ? h(CrEmpty, { text: "No sets on this card." }) : null,
     sets.map((s, si) => {
-      const active = crSetActiveVariant(s);
+      const active = crSetActiveVariant(s, card.id);
       return h("div", { key: s.id, style: Object.assign({}, rowStyle, { gap: CR_S_4 }) },
         h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center", flexWrap: "wrap" } },
           h("div", { style: { flex: "1 1 160px", minWidth: "0" } },
@@ -5878,6 +5978,20 @@ function CrBrainSetsEditor(props: { card: CrAnyCard; kind: CrCardKind; mobile: b
               : h(CrButton, { text: "Use in this story", icon: "", onClick: () => { crPickVariant(s.id, v.id).catch(() => {}); } }),
             h(CrButton, { text: "Remove", icon: "", onClick: () => { sets[si].variants.splice(vi, 1); commit(); } })
           ),
+          h(CrField, { label: "Use at", hint: "Relationship levels this version is for, when nothing is pinned and the schedule names none." },
+            h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_1 } },
+              (INTIMACY_LIST as readonly string[]).map((lv) => {
+                const on = !!v.intimacy && v.intimacy.indexOf(lv) >= 0;
+                return h(CrButton, {
+                  key: lv, text: lv, icon: "", primary: on,
+                  onClick: () => {
+                    const cur = (sets[si].variants[vi].intimacy || []).filter((x) => x !== lv);
+                    if (!on){ cur.push(lv); }
+                    sets[si].variants[vi].intimacy = cur.length ? cur : undefined;
+                    commit();
+                  }
+                });
+              }))),
           h(CrTextArea, { value: v.content, placeholder: "What the model should know while this is the one in use.",
             rows: props.mobile ? 4 : 3,
             onSet: (x: string) => { sets[si].variants[vi].content = x.slice(0, 4000); commit(); } }),
@@ -5966,7 +6080,9 @@ function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string;
   const rows: any[] = [];
   sets.forEach((s) => {
     const off = crSetIsOff(card.id, s);
-    const v = crSetActiveVariant(s);
+    const pick = crSetResolve(s, card.id);
+    const auto = crSetResolve(s, card.id, true);
+    const v = pick.v;
     const k = card.id + "|s:" + s.id;
     const body = crBrainShowsBody(k, mob);
     rows.push(h("div", { key: "s" + s.id, style: { padding: CR_S_2 + " 0", borderTop: CR_LINE_W + " solid " + CR_LINE, opacity: off ? "0.62" : "1" } },
@@ -5974,15 +6090,19 @@ function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string;
         v ? h(CrVariantThumb, { cardId: card.id, v: v, size: mob ? 32 : 36 }) : null,
         h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
           h(CrBrainName, { k: k, text: (s.name || "Set") + (v ? ": " + (v.name || "Unnamed") : ""), mobile: mob, expandable: true }),
-          body ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, v ? crBrainPreview(v.content) || "No brain text." : "No variants yet.") : null
+          body ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, v ? crSetWhyText(pick) + "  ·  " + (crBrainPreview(v.content) || "No brain text.") : "No variants yet.") : null
         ),
         (!mob || off) ? h(CrPill, { text: off ? "suppressed" : "in context", tone: off ? "" : "accent" }) : null,
         h(CrButton, { text: off ? "Restore" : "Suppress", icon: "", onClick: () => { crSetBrainOff(card.id, "s:" + s.id, !off).catch(() => {}); } })
       ),
       (body && s.variants.length > 1) ? h("div", { style: { marginTop: CR_S_2 } }, h(CrChoice, {
-        options: s.variants.map((x) => ({ id: x.id, label: x.name || "Unnamed" })),
-        active: v ? v.id : "",
-        onPick: (id: string) => { crPickVariant(s.id, id).catch(() => {}); }
+        options: [{ id: "auto", label: "Auto" + (auto.v ? ": " + (auto.v.name || "Unnamed") : "") }]
+          .concat(s.variants.map((x) => ({ id: x.id, label: x.name || "Unnamed" }))),
+        active: pick.why === "pinned" && v ? v.id : "auto",
+        onPick: (id: string) => {
+          if (id === "auto"){ crUnpinVariant(s.id).catch(() => {}); }
+          else { crPickVariant(s.id, id).catch(() => {}); }
+        }
       })) : null
     ));
   });
@@ -6055,7 +6175,8 @@ function CrChatBrainsTab(props: { mobile: boolean }) : any
       note: props.mobile
         ? "Suppress takes a brain out of this story without touching the card. Tap a name for its text, a set's versions, or a conditional's Auto / Always / Off."
         : "Suppress takes a brain out of this story's context without touching the card; Restore puts it back. "
-        + "A set sends the one version in use. A conditional entry is Auto (its keys decide, and the pill says what the "
+        + "A set sends the one version in use: picked here (pinned for this story), or on Auto the one the schedule links, "
+        + "then one marked for the relationship, then the first. A conditional entry is Auto (its keys decide, and the pill says what the "
         + "last build did), Always (sent every time in this chat, keys or not) or Off."
     }, fired ? h("div", { style: { marginTop: CR_S_2, color: CR_DIM, fontSize: CR_T_SM } },
         "Last build " + crReportAgo(fired.at) + ".") : null),
@@ -10590,6 +10711,28 @@ async function crScheduleDelete(char: Character, id: string) : Promise<void>
   for (const d of DAY_LIST){
     sched[d] = sched[d].filter((e) => e.id !== id);
   }
+  const links = Object.assign({}, crSchedLinksOf(char));
+  if (links[id]){
+    delete links[id];
+    const extra: any = char.cr || {};
+    extra.schedLinks = links;
+    char.cr = crSanitizeContactExtra(extra);
+  }
+  await crScheduleSave(char);
+}
+
+// [CR-SETS] While this event is on, a set uses this version (D-119). Empty = no change.
+async function crScheduleLinkSet(char: Character, eventId: string, setId: string, variantId: string) : Promise<void>
+{
+  const links: Record<string, Record<string, string>> = JSON.parse(JSON.stringify(crSchedLinksOf(char)));
+  const row: Record<string, string> = links[eventId] || {};
+  if (variantId){ row[setId] = variantId; }
+  else { delete row[setId]; }
+  if (Object.keys(row).length){ links[eventId] = row; }
+  else { delete links[eventId]; }
+  const extra: any = char.cr || {};
+  extra.schedLinks = links;
+  char.cr = crSanitizeContactExtra(extra);
   await crScheduleSave(char);
 }
 
@@ -10680,6 +10823,7 @@ function CrEventSheet() : any
       active: evt.requiredIntimacy || "none",
       onPick: (id: string) => set({ requiredIntimacy: id })
     }),
+    crEventSetChoices(char, evt.id),
     h("div", { style: { display: "flex", gap: CR_S_3, flexWrap: "wrap", paddingTop: CR_S_2 } },
       h(CrButton, { text: "Close", onClick: () => { crCloseEventSheet().catch(() => {}); } }),
       h("div", { style: { flex: "1 1 auto" } }),
@@ -10698,6 +10842,35 @@ function CrEventSheet() : any
       })
     )
   );
+}
+
+// The event sheet's "While this is on": one choice per set on this Contact and on the paired Scenario.
+function crEventSetChoices(char: Character, eventId: string) : any
+{
+  const row = crSchedLinksOf(char)[eventId] || {};
+  const owners: { card: CrAnyCard; label: string }[] = [{ card: char, label: char.name || "This Contact" }];
+  const scenario = crLiveScenario();
+  if (scenario){
+    owners.push({ card: scenario, label: scenario.name || "The Scenario" });
+  }
+  const rows: any[] = [];
+  owners.forEach((o) => {
+    crCardSets(o.card).filter((x) => x.variants.length > 0).forEach((x) => {
+      rows.push(h(CrChoice, {
+        key: o.card.id + "|" + x.id,
+        label: o.label + "  ·  " + (x.name || "Set"),
+        options: [{ id: "", label: "No change" }].concat(x.variants.map((v) => ({ id: v.id, label: v.name || "Unnamed" }))),
+        active: row[x.id] || "",
+        onPick: (id: string) => { crScheduleLinkSet(char, eventId, x.id, id).catch(() => {}); }
+      }));
+    });
+  });
+  return h(CrField, {
+    label: "While this is on",
+    hint: rows.length
+      ? "The version each set uses during this event, unless one is pinned on Chat > Brains. A Scenario's set follows only while that Scenario is paired."
+      : "Give this Contact (or the paired Scenario) a set on its Brains tab, and its versions can follow this event."
+  }, rows.length ? h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3, marginTop: CR_S_1 } }, rows) : null);
 }
 
 type CrStatusRead = { live: ScheduleEvent[]; gated: ScheduleEvent[]; paired: boolean; sent: boolean };
@@ -14057,7 +14230,7 @@ function crIllusPick(cardId: string, setId: string, variantId: string) : void
 {
   const card = crCardById(cardId);
   const set = crCardSets(card).find((x) => x.id === setId);
-  const chatV = set ? crSetActiveVariant(set) : undefined;
+  const chatV = set ? crSetActiveVariant(set, cardId) : undefined;
   const mine: Record<string, string> = crIllus.picks[cardId] || {};
   if (chatV && chatV.id === variantId){
     delete mine[setId];
@@ -14255,7 +14428,7 @@ function CrIllusComposer(props: { st: CrUiState }) : any
   const pickRows: any[] = [];
   cast.forEach((c) => {
     crCardSets(c).filter((x) => x.variants.length > 1).forEach((x) => {
-      const chatV = crSetActiveVariant(x);
+      const chatV = crSetActiveVariant(x, c.id);
       const mine = crIllus.picks[c.id] ? crIllus.picks[c.id][x.id] : undefined;
       pickRows.push(h(CrChoice, {
         key: c.id + "|" + x.id,
