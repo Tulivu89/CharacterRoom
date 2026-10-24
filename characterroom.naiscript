@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.6
+version: 1.0.7
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.6. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.7. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -45,8 +45,9 @@ SECTIONS (search "SECTION <NAME>")
   CR-BUBBLE   chat bubble look: record, resolver, the message segmenter, shaped markers
   CR-UI       shell window, tokens, surfaces, editor portraits, report; Chat > Chat opens cards and lists the group;
               card lists with folders, search, sort and a grid [CR-FOLDERS]
-  CR-IMG      image settings, prompt chunks, slot generation
-  CR-SCAN     story scan, cast detection, architect and enhance passes
+  CR-IMG      image settings, prompt chunks (per model, standard set), slot generation, caption assembly
+  CR-SCAN     story scan, cast detection, Architect / photo / Enhance prompts on GLM-4.6, scene parser and
+              payload builder (@ lines -> counts, captions, framing hides, positions) [CR-IMGV5]
   CR-ILLUS    illustrator
   CR-ARGEN    doors for AnotherRoom's generators
   CR-POSTS    the Contact's feed
@@ -72,7 +73,7 @@ HOOKS
 STORAGE
   account  characterListKey userListKey scenarioListKey defaultAuthorKey useImageDecoKey
            useEmotionalModesKey emojiRefKey gameRecordKey includeGameStatsKey cr.stage
-           cr.rpg.rulesets cr.cardFolders
+           cr.rpg.rulesets cr.cardFolders cr.imgStdMerged
   story    chatSettingsKey trackRealTimeKey trackRealTimeRecordKey rememberMeKey
            floatyBrainsKey floatyBrainsStateKey floatyActiveIdsKey floatyInactiveIdsKey
            diaryBrainsRecordKey actionPlansRecordKey forumThreadsRecordKey
@@ -87,6 +88,8 @@ BRIDGE MESSAGES (channel "hypebot", envelope {type, sid, payload})
   from bridge  HANDSHAKE_ACK AE_VIEWPORT AE_CHAR_IMAGE_SLOTS AE_GALLERY_INDEX_RESP
                AE_IMG_META_RESP AE_CARD_IMPORT_RESULT
   The bridge also writes --ce-img-ar onto the nearest [data-ce-ar-host] when it paints.
+  GENERATE_IMAGE from CR sets settings.qualityLast and settings.siteParams, and a characters[] entry may carry
+  center {x, y}; bridge 3.0.37 honours them, and CE (which sends none) is unchanged. [CR-IMGV5]
 
 HELPER MESSAGES (channel "cr-persona-helper", flat {type, sid, ...})
   PH_HELLO PH_PING PH_WAKE PH_PONG PH_RUN PH_DONE. Change both scripts or neither.
@@ -4925,6 +4928,7 @@ interface CrImgCard {
   avatarUC?: string;
   avatarSeed?: number;
   outfits?: CrOutfitChunk[];
+  handle?: string;
 }
 
 interface CrSimpleImages {
@@ -5149,6 +5153,10 @@ function crSanitizeImgCard(v: any) : CrImgCard | undefined
   const outfits = crSanitizeOutfits((v as any).outfits);
   if (outfits){
     out.outfits = outfits;
+  }
+  const handle = crSanitizeText((v as any).handle, 60);
+  if (handle){
+    out.handle = handle;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -5709,13 +5717,13 @@ async function crGenerateVariantImage(card: CrAnyCard, kind: CrCardKind, set: Cr
       settings: {
         model: crImgSettings.model, width: crImgSettings.width, height: crImgSettings.height,
         scale: crImgSettings.scale, steps: crImgSettings.steps, seed: crImgSettings.seed,
-        quality: compiled.quality, negative: compiled.negative
+        quality: compiled.quality, negative: compiled.negative, qualityLast: true, siteParams: true
       }
     });
   }
   else {
     const cast = card as CrCastCard;
-    const assembled = crAssembleCharacterPrompt(cast, "avatar", { setId: set.id, variantId: v.id });
+    const assembled = crAssembleCharacterPrompt(cast, "avatar", { only: { setId: set.id, variantId: v.id } });
     if (!assembled.visuals){
       try{ await api.v1.ui.toast("This card has nothing to draw — write an Appearance or a Universal prompt first.", { type: "warning" }); }
       catch (e){}
@@ -5724,13 +5732,13 @@ async function crGenerateVariantImage(card: CrAnyCard, kind: CrCardKind, set: Cr
     const base = crAssembleBasePrompt(cast, "avatar");
     await crBridgeSend("GENERATE_IMAGE", {
       kind: "charSlot", charId: card.id, slot: slot, uuid: uuid,
-      prompt: "full body, standing, simple background",
+      prompt: crCountTags([crKind(cast)]).concat(["solo", "full body, standing, simple background"]).join(", "),
       extraBaseVisuals: base.base, extraBaseUC: base.uc,
       characters: [{ name: cast.name || "character", visuals: assembled.visuals, uc: assembled.uc }],
       settings: {
         model: crImgSettings.model, width: crImgSettings.width, height: crImgSettings.height,
         scale: crImgSettings.scale, steps: crImgSettings.steps, seed: crImgSettings.seed,
-        quality: compiled.quality, negative: compiled.negative
+        quality: compiled.quality, negative: compiled.negative, qualityLast: true, siteParams: true
       }
     });
   }
@@ -5836,17 +5844,39 @@ function crBrainPreview(text: string) : string
   return t.length > 110 ? t.slice(0, 108) + "…" : t;
 }
 
-function CrBrainSwitchRow(props: { name: string; detail: string; state: string; tone: string; off: boolean; onToggle: () => void }) : any
+// On a phone a brain row is one line (name, switch); tapping the name opens its text and choices.
+const crBrainOpen: Record<string, boolean> = {};
+
+function CrBrainName(props: { k: string; text: string; mobile: boolean; expandable: boolean }) : any
 {
+  const can = props.mobile && props.expandable;
+  const open = !!crBrainOpen[props.k];
   return h("div", {
-    style: { display: "flex", gap: CR_S_3, alignItems: "flex-start", padding: CR_S_2 + " 0",
+    onClick: can ? () => { crBrainOpen[props.k] = !open; crTouch(); } : undefined,
+    style: {
+      color: CR_HEAD, fontSize: CR_T_BASE, fontWeight: "600", cursor: can ? "pointer" : "default",
+      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: props.mobile ? "nowrap" : "normal"
+    }
+  }, (can ? (open ? "▾ " : "▸ ") : "") + (props.text || "Unnamed"));
+}
+
+function crBrainShowsBody(k: string, mobile: boolean) : boolean
+{
+  return !mobile || !!crBrainOpen[k];
+}
+
+function CrBrainSwitchRow(props: { k: string; mobile: boolean; name: string; detail: string; state: string; tone: string; off: boolean; onToggle: () => void }) : any
+{
+  const body = crBrainShowsBody(props.k, props.mobile);
+  return h("div", {
+    style: { display: "flex", gap: CR_S_3, alignItems: props.mobile ? "center" : "flex-start", padding: CR_S_2 + " 0",
              borderTop: CR_LINE_W + " solid " + CR_LINE, opacity: props.off ? "0.62" : "1" }
   },
     h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
-      h("div", { style: { color: CR_HEAD, fontSize: CR_T_BASE, fontWeight: "600" } }, props.name || "Unnamed"),
-      props.detail ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } }, props.detail) : null
+      h(CrBrainName, { k: props.k, text: props.name, mobile: props.mobile, expandable: !!props.detail }),
+      (body && props.detail) ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } }, props.detail) : null
     ),
-    h(CrPill, { text: props.state, tone: props.tone }),
+    (!props.mobile || props.off) ? h(CrPill, { text: props.state, tone: props.tone }) : null,
     h(CrButton, { text: props.off ? "Restore" : "Suppress", icon: "", onClick: props.onToggle })
   );
 }
@@ -5854,6 +5884,7 @@ function CrBrainSwitchRow(props: { name: string; detail: string; state: string; 
 function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string; mobile: boolean; readsConditional: boolean }) : any
 {
   const card = props.card;
+  const mob = props.mobile;
   const live: any = crCardById(card.id) || card;
   const sets = crCardSets(live);
   const brains: BrainEntry[] = live.brains || [];
@@ -5863,17 +5894,19 @@ function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string;
   sets.forEach((s) => {
     const off = crSetIsOff(card.id, s);
     const v = crSetActiveVariant(s);
+    const k = card.id + "|s:" + s.id;
+    const body = crBrainShowsBody(k, mob);
     rows.push(h("div", { key: "s" + s.id, style: { padding: CR_S_2 + " 0", borderTop: CR_LINE_W + " solid " + CR_LINE, opacity: off ? "0.62" : "1" } },
       h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center" } },
-        v ? h(CrVariantThumb, { cardId: card.id, v: v, size: 36 }) : null,
+        v ? h(CrVariantThumb, { cardId: card.id, v: v, size: mob ? 32 : 36 }) : null,
         h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
-          h("div", { style: { color: CR_HEAD, fontSize: CR_T_BASE, fontWeight: "600" } }, (s.name || "Set") + (v ? ": " + (v.name || "Unnamed") : "")),
-          h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, v ? crBrainPreview(v.content) || "No brain text." : "No variants yet.")
+          h(CrBrainName, { k: k, text: (s.name || "Set") + (v ? ": " + (v.name || "Unnamed") : ""), mobile: mob, expandable: true }),
+          body ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, v ? crBrainPreview(v.content) || "No brain text." : "No variants yet.") : null
         ),
-        h(CrPill, { text: off ? "suppressed" : "in context", tone: off ? "" : "accent" }),
+        (!mob || off) ? h(CrPill, { text: off ? "suppressed" : "in context", tone: off ? "" : "accent" }) : null,
         h(CrButton, { text: off ? "Restore" : "Suppress", icon: "", onClick: () => { crSetBrainOff(card.id, "s:" + s.id, !off).catch(() => {}); } })
       ),
-      s.variants.length > 1 ? h("div", { style: { marginTop: CR_S_2 } }, h(CrChoice, {
+      (body && s.variants.length > 1) ? h("div", { style: { marginTop: CR_S_2 } }, h(CrChoice, {
         options: s.variants.map((x) => ({ id: x.id, label: x.name || "Unnamed" })),
         active: v ? v.id : "",
         onPick: (id: string) => { crPickVariant(s.id, id).catch(() => {}); }
@@ -5883,13 +5916,15 @@ function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string;
   brains.forEach((b, i) => {
     const off = crBrainIsOff(card.id, "b:" + b.name);
     rows.push(h(CrBrainSwitchRow, {
-      key: "b" + i, name: b.name, detail: crBrainPreview(b.content), off: off,
+      key: "b" + i, k: card.id + "|b:" + i, mobile: mob, name: b.name, detail: crBrainPreview(b.content), off: off,
       state: off ? "suppressed" : "in context", tone: off ? "" : "accent",
       onToggle: () => { crSetBrainOff(card.id, "b:" + b.name, !off).catch(() => {}); }
     }));
   });
   conds.forEach((c, i) => {
     const mode = crCondMode(card.id, c.name);
+    const k = card.id + "|c:" + i;
+    const body = crBrainShowsBody(k, mob);
     let state = "waiting";
     let tone = "";
     if (mode === "off"){ state = "suppressed"; }
@@ -5901,19 +5936,19 @@ function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string;
       key: "c" + i,
       style: { padding: CR_S_2 + " 0", borderTop: CR_LINE_W + " solid " + CR_LINE, opacity: mode === "off" ? "0.62" : "1" }
     },
-      h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "flex-start" } },
+      h("div", { style: { display: "flex", gap: CR_S_3, alignItems: mob ? "center" : "flex-start" } },
         h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
-          h("div", { style: { color: CR_HEAD, fontSize: CR_T_BASE, fontWeight: "600" } }, c.name || "Unnamed"),
-          h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
-            "Keys: " + ((c.keys || []).join(", ") || "none") + "  ·  " + crBrainPreview(c.content))
+          h(CrBrainName, { k: k, text: c.name, mobile: mob, expandable: true }),
+          body ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
+            "Keys: " + ((c.keys || []).join(", ") || "none") + "  ·  " + crBrainPreview(c.content)) : null
         ),
         h(CrPill, { text: state, tone: tone })
       ),
-      h("div", { style: { marginTop: CR_S_2 } }, h(CrChoice, {
+      body ? h("div", { style: { marginTop: CR_S_2 } }, h(CrChoice, {
         options: [{ id: "auto", label: "Auto" }, { id: "always", label: "Always" }, { id: "off", label: "Off" }],
         active: mode,
         onPick: (id: string) => { crSetCondMode(card.id, c.name, id).catch(() => {}); }
-      }))
+      })) : null
     ));
   });
   return h(CrSection, {
@@ -5944,7 +5979,9 @@ function CrChatBrainsTab(props: { mobile: boolean }) : any
   return h("div", { class: "cr-chat-brains" },
     h(CrSection, {
       title: "Brains in this chat",
-      note: "Suppress takes a brain out of this story's context without touching the card; Restore puts it back. "
+      note: props.mobile
+        ? "Suppress takes a brain out of this story without touching the card. Tap a name for its text, a set's versions, or a conditional's Auto / Always / Off."
+        : "Suppress takes a brain out of this story's context without touching the card; Restore puts it back. "
         + "A set sends the one version in use. A conditional entry is Auto (its keys decide, and the pill says what the "
         + "last build did), Always (sent every time in this chat, keys or not) or Off."
     }, fired ? h("div", { style: { marginTop: CR_S_2, color: CR_DIM, fontSize: CR_T_SM } },
@@ -5958,7 +5995,7 @@ function CrChatBrainsTab(props: { mobile: boolean }) : any
       note: "This story's floaty brains, the same switches as the CR Brains panel. They have no keys: On means sent every time."
     }, h("div", { style: { marginTop: CR_S_2 } },
       floatyBrainsList.length ? floatyBrainsList.map((b) => h(CrBrainSwitchRow, {
-        key: b.id, name: b.entry.name, detail: crBrainPreview(b.entry.content), off: !b.active,
+        key: b.id, k: "floaty|" + b.id, mobile: props.mobile, name: b.entry.name, detail: crBrainPreview(b.entry.content), off: !b.active,
         state: b.active ? "on" : "off", tone: b.active ? "accent" : "",
         onToggle: () => { crFloatySetActive(b.id, !b.active).catch(() => {}); }
       })) : h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "None in this story.")
@@ -7951,11 +7988,11 @@ function CrSlotSheet() : any
     })(),
     h(CrSection, {
       title: "Emotion tag",
-      note: "What makes a render read as " + slot + ". This is the account default and every Contact uses it. Left empty, the slot name is sent as written."
+      note: "What makes a render read as " + slot + ". This is the account default and every Contact uses it. Left empty, the built-in tags shown faintly are sent."
     }, h("div", { style: { marginTop: CR_S_3 } },
       h(CrTextInput, {
         value: crEmotionTagDefault(slot),
-        placeholder: slot,
+        placeholder: crEmotionBuiltIn(slot),
         onSet: (v: string) => { crSetEmotionTag(slot, v).catch(() => {}); }
       })
     )),
@@ -7967,7 +8004,7 @@ function CrSlotSheet() : any
     }, h("div", { style: { marginTop: CR_S_3 } },
       h(CrTextInput, {
         value: crHasSlotOverride(char, slot) ? crSlotTag(char, slot) : "",
-        placeholder: crEmotionTagDefault(slot) || slot,
+        placeholder: crEmotionTagDefault(slot) || crEmotionBuiltIn(slot),
         onSet: (v: string) => { crSetSlotTag(char, slot, v).catch(() => {}); }
       })
     )),
@@ -8531,8 +8568,20 @@ function CrVisualsTab(props: { char: CrCastCard }) : any
   const set = (k: string) => (v: string) => { crSetImgCardField(char, k, v).catch(() => {}); };
   const preview = crAssembleCharacterPrompt(char, "avatar");
   const previewIll = crAssembleCharacterPrompt(char, "illustrate");
+  const handleNow = crHandle(char);
+  const handleClash = !(card.handle || "").trim() &&
+    (charList as CrCastCard[]).concat(userList).some((o) => o.id !== char.id && crHandle(o) === handleNow);
 
   return h("div", { class: "cr-images-tab" },
+    h(CrSection, {
+      title: "Handle",
+      note: "How scene text refers to " + (char.name || "this card") + " — the image model never sees names. "
+        + "A few words a picture shows, e.g. cat girl or man in apron."
+    }, h("div", { style: { marginTop: CR_S_3 } },
+      h(CrTextInput, { value: card.handle || "", placeholder: handleNow, onSet: set("handle") }),
+      handleClash ? h("div", { style: { marginTop: CR_S_2, color: CR_WARN, fontSize: CR_T_SM, lineHeight: "1.45" } },
+        "Another card also reads as \"" + handleNow + "\". Set a handle so scenes can tell them apart.") : null
+    )),
     h(CrSection, {
       title: "Base",
       note: "Goes in the scene prompt of any image this card is in. Scene-level things, not body description."
@@ -11656,15 +11705,34 @@ function CrPromptPair(props: {
   );
 }
 
+let crChunkShowAll = false;
+
+function crImgModelLabel(id: string) : string
+{
+  const m = CR_IMG_MODELS.find((x) => x.id === id);
+  return m ? m.label : id;
+}
+
 function CrImgFieldsPanel() : any
 {
   const compiled = crCompileImgFields();
+  const model = crImgSettings.model;
+  const elsewhere = crImgFields.filter((f) => !crChunkFits(f, model)).length;
   return h("div", null,
-    crImgFields.map((f, idx) => h("div", {
+    h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center", flexWrap: "wrap", marginBottom: CR_S_3 } },
+      h("div", { style: { flex: "1 1 160px", minWidth: "0", color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
+        (crChunkShowAll ? "Every chunk." : ("Chunks " + crImgModelLabel(model) + " uses.")) +
+        (elsewhere > 0 ? " " + elsewhere + " more belong to other models." : "")),
+      elsewhere > 0 ? h(CrButton, {
+        text: crChunkShowAll ? "Show this model's" : "Show all", icon: "",
+        onClick: () => { crChunkShowAll = !crChunkShowAll; crTouch(); }
+      }) : null
+    ),
+    crImgFields.map((f, idx) => (!crChunkShowAll && !crChunkFits(f, model)) ? null : h("div", {
       key: f.id,
       style: {
         border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
-        padding: "10px", marginBottom: CR_S_3, background: f.active ? "transparent" : CR_SUNK
+        padding: "10px", marginBottom: CR_S_3, background: (f.active && crChunkFits(f, model)) ? "transparent" : CR_SUNK
       }
     },
       h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center", marginBottom: CR_S_3, flexWrap: "wrap" } },
@@ -11687,9 +11755,20 @@ function CrImgFieldsPanel() : any
           onClick: () => { crImgFields.splice(idx, 1); crSaveImgFields().catch(() => {}); }
         })
       ),
-      h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2 } },
+      h(CrChoice, {
+        label: "Used by",
+        options: CR_CHUNK_SCOPES.map((s) => ({ id: s.id, label: s.label })),
+        active: crChunkScope(f),
+        onPick: (id: string) => {
+          const scope = CR_CHUNK_SCOPES.find((s) => s.id === id);
+          if (scope && scope.models.length > 0){ crImgFields[idx].models = scope.models.slice(); }
+          else { delete crImgFields[idx].models; }
+          crSaveImgFields().catch(() => {});
+        }
+      }),
+      h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, marginTop: CR_S_2 } },
         h(CrTextArea, {
-          value: f.basePrompt, placeholder: "added to the prompt",
+          value: f.basePrompt, placeholder: "added to the end of the prompt",
           onSet: (v: string) => { crImgFields[idx].basePrompt = v.slice(0, 1200); crSaveImgFields().catch(() => {}); }
         }),
         h(CrTextArea, {
@@ -11698,12 +11777,12 @@ function CrImgFieldsPanel() : any
         }),
         h(CrNumField, {
           label: "Weight", value: f.weight,
-          hint: "1 sends the text plain. Anything else wraps it as N::text::",
+          hint: "1 sends the text plain. Anything else wraps it as N::text ::. Keep a chunk that already holds :: at 1.",
           onSet: (n: number) => { crImgFields[idx].weight = Math.max(0.1, Math.min(10, n)); crSaveImgFields().catch(() => {}); }
         })
       )
     )),
-    h("div", { style: { display: "flex", gap: CR_S_3, marginBottom: "10px" } },
+    h("div", { style: { display: "flex", gap: CR_S_3, marginBottom: "10px", flexWrap: "wrap" } },
       h(CrButton, {
         text: "Add a chunk",
         disabled: crImgFields.length >= 24,
@@ -11711,10 +11790,15 @@ function CrImgFieldsPanel() : any
           crImgFields.push({ id: "cr-f" + Date.now(), label: "New chunk", basePrompt: "", uc: "", weight: 1, active: true });
           crSaveImgFields().catch(() => {});
         }
+      }),
+      h(CrButton, {
+        text: "Add standard chunks", icon: "",
+        disabled: crImgFields.length >= 24,
+        onClick: () => { crImgAddStandard().catch(() => {}); }
       })
     ),
     h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" } },
-      h("div", null, "Prompt: " + (compiled.quality || "(nothing active)")),
+      h("div", null, "Prompt end: " + (compiled.quality || "(nothing active)")),
       h("div", { style: { marginTop: CR_S_1 } }, "Negative: " + (compiled.negative || "(nothing active)"))
     )
   );
@@ -11727,7 +11811,7 @@ function CrImgSettingsPanel() : any
     h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginBottom: CR_S_4 } },
       CR_IMG_MODELS.map((m) => h(CrButton, {
         key: m.id, text: m.label, primary: crImgSettings.model === m.id,
-        onClick: () => { crImgSettings.model = m.id; crSaveImgSettings().catch(() => {}); }
+        onClick: () => { crImgPickModel(m.id).catch(() => {}); }
       }))
     ),
     h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, marginBottom: CR_S_2 } }, "Size"),
@@ -12019,13 +12103,13 @@ function CrIllusTagsTab() : any
   return h("div", { class: "cr-illus-tags" },
     h(CrSection, {
       title: "Emotion tags",
-      note: "What each slot name means to the image model, for every Contact. A Contact can override one from its own slot sheet, and a tag left blank falls back to the slot's own name."
+      note: "What each slot name means to the image model, for every Contact. A Contact can override one from its own slot sheet, and a tag left blank sends the built-in tags shown faintly."
     }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
       EMOTION_LIST.concat([CR_SLOT_AVATAR]).map((slot) => h(CrField, {
         key: slot, label: slot
       }, h(CrTextInput, {
         value: crEmotionTagDefault(slot),
-        placeholder: slot === CR_SLOT_AVATAR ? "(neutral — no emotion word)" : slot,
+        placeholder: slot === CR_SLOT_AVATAR ? "(neutral — no emotion word)" : crEmotionBuiltIn(slot),
         onSet: (v: string) => { crSetEmotionTag(slot, v).catch(() => {}); }
       })))
     ))
@@ -12513,6 +12597,7 @@ type CrImgField = {
   uc: string;
   weight: number;
   active: boolean;
+  models?: string[];
 };
 
 const CR_IMG_SETTINGS_DEFAULT: CrImgSettings = {
@@ -12520,16 +12605,118 @@ const CR_IMG_SETTINGS_DEFAULT: CrImgSettings = {
   width: 832, height: 1216, scale: 5.0, steps: 28, seed: 0
 };
 
-const CR_IMG_FIELDS_DEFAULT: CrImgField[] = [
-  {
-    id: "cr-base",
-    label: "Base quality",
-    basePrompt: "best quality, very aesthetic, absurdres",
-    uc: "lowres, worst quality, bad anatomy, bad hands, jpeg artifacts, watermark, signature",
-    weight: 1,
-    active: true
-  }
+// [CR-IMGV5] The standard chunk set: the site's Quality Tags toggle and UC presets written out, since the API
+// applies neither (docs.novelai.net, Quality Tags and Undesired Content, 2026-10-24). Each chunk names the models
+// it serves; one quality chunk and one UC chunk per model ship on, the alternatives off. A chunk without models
+// serves every model, as before.
+const CR_M_V5 = ["nai-diffusion-5-full", "nai-diffusion-5-curated"];
+const CR_M_V45_FULL = ["nai-diffusion-4-5-full"];
+const CR_M_V45_CURATED = ["nai-diffusion-4-5-curated"];
+
+const CR_CHUNK_SCOPES: { id: string; label: string; models: string[] }[] = [
+  { id: "all",  label: "All models",   models: [] },
+  { id: "v5",   label: "V5",           models: CR_M_V5 },
+  { id: "v45f", label: "V4.5 Full",    models: CR_M_V45_FULL },
+  { id: "v45c", label: "V4.5 Curated", models: CR_M_V45_CURATED }
 ];
+
+const CR_UC_HEAVY = "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page";
+const CR_UC_HUMAN = CR_UC_HEAVY + ", @_@, mismatched pupils, glowing eyes, bad anatomy";
+const CR_UC_FURRY = "{worst quality}, distracting watermark, unfinished, bad quality, {widescreen}, upscale, {sequence}, {{grandfathered content}}, blurred foreground, chromatic aberration, sketch, everyone, [sketch background], simple, [flat colors], ych (character), outline, multiple scenes, [[horror (theme)]], comic";
+
+function crStdChunk(id: string, label: string, models: string[], basePrompt: string, uc: string, active: boolean) : CrImgField
+{
+  return { id: id, label: label, basePrompt: basePrompt, uc: uc, weight: 1, active: active, models: models.slice() };
+}
+
+const CR_IMG_FIELDS_STANDARD: CrImgField[] = [
+  crStdChunk("std-v5-qt",       "V5 quality tags",           CR_M_V5, "very aesthetic, masterpiece, no text", "", true),
+  crStdChunk("std-v5-qt-light", "V5 quality tags (light)",   CR_M_V5, "very aesthetic, amazing quality, no text", "", false),
+  crStdChunk("std-v5-uc-light", "V5 UC: Light",              CR_M_V5, "",
+    "lowres, bad hands, bad anatomy, artistic error, sepia, white haze, worst quality, very displeasing, jpeg artifacts, 0::ai-generated::", true),
+  crStdChunk("std-v5-uc-heavy", "V5 UC: Heavy",              CR_M_V5, "", CR_UC_HEAVY, false),
+  crStdChunk("std-v5-uc-human", "V5 UC: Human Focus",        CR_M_V5, "", CR_UC_HUMAN, false),
+  crStdChunk("std-v5-uc-furry", "V5 UC: Furry Focus",        CR_M_V5, "", CR_UC_FURRY, false),
+
+  crStdChunk("std-v45f-qt",       "V4.5 Full quality tags",  CR_M_V45_FULL, "location, very aesthetic, masterpiece, no text", "", true),
+  crStdChunk("std-v45f-uc-light", "V4.5 Full UC: Light",     CR_M_V45_FULL, "",
+    "lowres, artistic error, scan artifacts, worst quality, bad quality, jpeg artifacts, multiple views, very displeasing, too many watermarks, negative space, blank page", true),
+  crStdChunk("std-v45f-uc-heavy", "V4.5 Full UC: Heavy",     CR_M_V45_FULL, "", CR_UC_HEAVY, false),
+  crStdChunk("std-v45f-uc-human", "V4.5 Full UC: Human Focus", CR_M_V45_FULL, "", CR_UC_HUMAN, false),
+  crStdChunk("std-v45f-uc-furry", "V4.5 Full UC: Furry Focus", CR_M_V45_FULL, "", CR_UC_FURRY, false),
+
+  crStdChunk("std-v45c-qt",       "V4.5 Curated quality tags", CR_M_V45_CURATED,
+    "location, masterpiece, no text, -0.8::feet::, rating:general", "", true),
+  crStdChunk("std-v45c-uc-light", "V4.5 Curated UC: Light",  CR_M_V45_CURATED, "",
+    "blurry, lowres, upscaled, artistic error, scan artifacts, jpeg artifacts, logo, too many watermarks, negative space, blank page", true),
+  crStdChunk("std-v45c-uc-heavy", "V4.5 Curated UC: Heavy",  CR_M_V45_CURATED, "",
+    "blurry, lowres, upscaled, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, halftone, multiple views, logo, too many watermarks, negative space, blank page", false),
+  crStdChunk("std-v45c-uc-human", "V4.5 Curated UC: Human Focus", CR_M_V45_CURATED, "",
+    "blurry, lowres, upscaled, artistic error, film grain, scan artifacts, bad anatomy, bad hands, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, halftone, multiple views, logo, too many watermarks, @_@, mismatched pupils, glowing eyes, negative space, blank page", false)
+];
+
+const CR_IMG_FIELDS_DEFAULT: CrImgField[] = CR_IMG_FIELDS_STANDARD;
+
+// The 1.0.0 default chunk, recognised so the merge can switch it off while it is untouched.
+const CR_IMG_FIELD_LEGACY_BASE = {
+  id: "cr-base",
+  basePrompt: "best quality, very aesthetic, absurdres",
+  uc: "lowres, worst quality, bad anatomy, bad hands, jpeg artifacts, watermark, signature"
+};
+
+// Guidance and steps a model family is offered when the model is switched (the site's V5 and V4.5 defaults).
+const CR_IMG_TUNING: Record<string, { scale: number; steps: number }> = {
+  v5:  { scale: 4.5, steps: 23 },
+  v45: { scale: 5, steps: 28 }
+};
+
+function crImgFamily(model: string) : string
+{
+  return String(model || "").indexOf("nai-diffusion-5") === 0 ? "v5" : "v45";
+}
+
+function crChunkFits(f: CrImgField, model: string) : boolean
+{
+  return !f.models || f.models.length === 0 || f.models.indexOf(model) >= 0;
+}
+
+function crChunkScope(f: CrImgField) : string
+{
+  const mine = (f.models || []).slice().sort().join("|");
+  for (let i = 0; i < CR_CHUNK_SCOPES.length; i++){
+    if (CR_CHUNK_SCOPES[i].models.slice().sort().join("|") === mine){
+      return CR_CHUNK_SCOPES[i].id;
+    }
+  }
+  return "";
+}
+
+// Appends any standard chunk not already present (by id) up to the 24-chunk cap, never touches an edited one,
+// and switches the untouched 1.0.0 default off so its quality tags and UC do not stack on the new ones.
+function crImgFieldsAddStandard(list: CrImgField[], cap?: number) : CrImgField[]
+{
+  const max = cap || 24;
+  const out = list.map((f) => {
+    const copy: CrImgField = { id: f.id, label: f.label, basePrompt: f.basePrompt, uc: f.uc,
+                               weight: f.weight, active: f.active };
+    if (f.models){ copy.models = f.models.slice(); }
+    if (f.id === CR_IMG_FIELD_LEGACY_BASE.id &&
+        f.basePrompt.trim() === CR_IMG_FIELD_LEGACY_BASE.basePrompt &&
+        f.uc.trim() === CR_IMG_FIELD_LEGACY_BASE.uc){
+      copy.active = false;
+    }
+    return copy;
+  });
+  const have: Record<string, boolean> = {};
+  out.forEach((f) => { have[f.id] = true; });
+  for (let i = 0; i < CR_IMG_FIELDS_STANDARD.length && out.length < max; i++){
+    const s = CR_IMG_FIELDS_STANDARD[i];
+    if (!have[s.id]){
+      out.push(crStdChunk(s.id, s.label, s.models || [], s.basePrompt, s.uc, s.active));
+    }
+  }
+  return out;
+}
 
 await api.v1.storage.setIfAbsent(CR_IMG_SETTINGS_KEY, CR_IMG_SETTINGS_DEFAULT);
 await api.v1.storage.setIfAbsent(CR_IMG_FIELDS_KEY, CR_IMG_FIELDS_DEFAULT);
@@ -12577,7 +12764,7 @@ function crImgModelKnown(id: string) : boolean
 function crSanitizeImgFields(v: any) : CrImgField[]
 {
   if (!Array.isArray(v)){
-    return CR_IMG_FIELDS_DEFAULT.slice();
+    return CR_IMG_FIELDS_DEFAULT.map((f) => crStdChunk(f.id, f.label, f.models || [], f.basePrompt, f.uc, f.active));
   }
   const out: CrImgField[] = [];
   for (let i = 0; i < v.length && out.length < 24; i++){
@@ -12587,14 +12774,21 @@ function crSanitizeImgFields(v: any) : CrImgField[]
     }
     const id = typeof raw.id === "string" && raw.id ? raw.id.slice(0, 64) : ("cr-f" + i);
     const wRaw = Number(raw.weight);
-    out.push({
+    const f: CrImgField = {
       id: id,
       label: typeof raw.label === "string" ? raw.label.slice(0, 80) : "Chunk",
       basePrompt: typeof raw.basePrompt === "string" ? raw.basePrompt.slice(0, 1200) : "",
       uc: typeof raw.uc === "string" ? raw.uc.slice(0, 1200) : "",
       weight: (isFinite(wRaw) && wRaw > 0) ? Math.max(0.1, Math.min(10, wRaw)) : 1,
       active: raw.active !== false
-    });
+    };
+    const models = Array.isArray(raw.models)
+      ? raw.models.filter((m: any) => typeof m === "string" && crImgModelKnown(m))
+      : [];
+    if (models.length > 0){
+      f.models = models;
+    }
+    out.push(f);
   }
   return out;
 }
@@ -12618,6 +12812,19 @@ function crSanitizeEmotionTags(v: any) : Record<string, string>
 let crEmotionTags: Record<string, string> = crSanitizeEmotionTags(await api.v1.storage.get(CR_EMOTAGS_KEY));
 let crImgSettings: CrImgSettings = crSanitizeImgSettings(await api.v1.storage.get(CR_IMG_SETTINGS_KEY));
 let crImgFields: CrImgField[] = crSanitizeImgFields(await api.v1.storage.get(CR_IMG_FIELDS_KEY));
+
+// [CR-IMGV5] Once per account: add the standard chunks to an existing list and retire the untouched 1.0.0 default.
+const CR_IMG_STD_MERGED_KEY = "cr.imgStdMerged";
+try{
+  if ((await api.v1.storage.get(CR_IMG_STD_MERGED_KEY)) !== true){
+    crImgFields = crImgFieldsAddStandard(crImgFields);
+    await api.v1.storage.set(CR_IMG_FIELDS_KEY, crImgFields);
+    await api.v1.storage.set(CR_IMG_STD_MERGED_KEY, true);
+  }
+}
+catch (e){
+  api.v1.error("[CR:img] could not add the standard chunks:", e);
+}
 
 async function crSaveImgSettings() : Promise<void>
 {
@@ -12664,26 +12871,87 @@ async function crSaveImgFields() : Promise<void>
   crTouch();
 }
 
-function crCompileImgFields() : { quality: string; negative: string }
+// [CR-IMGV5] A model switch across families (V5 / V4.5) also moves guidance and steps to that family's defaults.
+async function crImgPickModel(id: string) : Promise<void>
 {
+  const was = crImgFamily(crImgSettings.model);
+  crImgSettings.model = id;
+  const now = crImgFamily(id);
+  if (now !== was && CR_IMG_TUNING[now]){
+    crImgSettings.scale = CR_IMG_TUNING[now].scale;
+    crImgSettings.steps = CR_IMG_TUNING[now].steps;
+    try{ await api.v1.ui.toast("Guidance " + crImgSettings.scale + " and " + crImgSettings.steps + " steps suit this model. Change them below if you like.", { type: "info", autoClose: 3500 }); }
+    catch (e){}
+  }
+  await crSaveImgSettings();
+}
+
+async function crImgAddStandard() : Promise<void>
+{
+  const before = crImgFields.length;
+  crImgFields = crImgFieldsAddStandard(crImgFields);
+  await crSaveImgFields();
+  const added = crImgFields.length - before;
+  try{ await api.v1.ui.toast(added > 0 ? ("Added " + added + " standard chunk" + (added === 1 ? "." : "s.")) : "Every standard chunk is already here.", { type: "info", autoClose: 2500 }); }
+  catch (e){}
+}
+
+// [CR-IMGV5] Only the chunks for this model. A space before a closing "::" keeps a chunk that ends in a digit
+// ("year 2026") from reading as a new weight. A chunk that already holds "::" belongs at weight 1.
+function crCompileImgFields(model?: string) : { quality: string; negative: string }
+{
+  const target = model || crImgSettings.model;
   const qualityParts: string[] = [];
   const negativeParts: string[] = [];
   for (let i = 0; i < crImgFields.length; i++){
     const f = crImgFields[i];
-    if (!f.active){
+    if (!f.active || !crChunkFits(f, target)){
       continue;
     }
     const w = (typeof f.weight === "number" && f.weight > 0) ? Math.max(0.1, Math.min(10, f.weight)) : 1;
     const bp = (f.basePrompt || "").trim();
     const uc = (f.uc || "").trim();
     if (bp){
-      qualityParts.push(w !== 1 ? (w + "::" + bp + "::") : bp);
+      qualityParts.push(w !== 1 ? (w + "::" + bp + " ::") : bp);
     }
     if (uc){
-      negativeParts.push(w !== 1 ? (w + "::" + uc + "::") : uc);
+      negativeParts.push(w !== 1 ? (w + "::" + uc + " ::") : uc);
     }
   }
   return { quality: qualityParts.join(", "), negative: negativeParts.join(", ") };
+}
+
+// [CR-IMGV5] Built-in emotion tags, used until the account or the card says otherwise. Each carries its own gaze.
+const CR_EMOTION_TAG_DEFAULTS: Record<string, string> = {
+  angry: "angry, frown, v-shaped eyebrows, looking at viewer",
+  aroused: "blush, heavy breathing, half-closed eyes, parted lips, looking at viewer",
+  bored: "bored, half-closed eyes, head rest, looking to the side",
+  confused: "confused, raised eyebrows, looking at viewer",
+  determined: "serious, v-shaped eyebrows, closed mouth, looking at viewer",
+  disgusted: "disgust, frown, looking at viewer",
+  embarrassed: "embarrassed, blush, looking away",
+  excited: "excited, :d, sparkling eyes, looking at viewer",
+  happy: "happy, smile, looking at viewer",
+  hurt: "tears, frown, looking down",
+  irritated: "annoyed, frown, looking at viewer",
+  laughing: "laughing, open mouth, closed eyes",
+  love: "light blush, light smile, half-closed eyes, looking at viewer",
+  nervous: "nervous, sweatdrop, looking to the side",
+  neutral: "closed mouth, looking at viewer",
+  playful: ":p, one eye closed, looking at viewer",
+  sad: "sad, frown, looking down",
+  scared: "scared, wide-eyed, sweat, looking at viewer",
+  shy: "shy, blush, looking away",
+  smug: "smug, smirk, half-closed eyes, looking at viewer",
+  surprised: "surprised, wide-eyed, open mouth, looking at viewer",
+  thinking: "thinking, closed mouth, looking up",
+  tired: "sleepy, half-closed eyes, looking at viewer",
+  worried: "furrowed brow, frown, looking down"
+};
+
+function crEmotionBuiltIn(slot: string) : string
+{
+  return CR_EMOTION_TAG_DEFAULTS[slot] || slot;
 }
 
 function crSlotTag(char: CrCastCard, slot: string) : string
@@ -12695,7 +12963,7 @@ function crSlotTag(char: CrCastCard, slot: string) : string
   if (typeof crEmotionTags[slot] === "string"){
     return crEmotionTags[slot];
   }
-  return (slot === CR_SLOT_AVATAR || slot === CR_SLOT_BANNER) ? "" : slot;
+  return (slot === CR_SLOT_AVATAR || slot === CR_SLOT_BANNER) ? "" : crEmotionBuiltIn(slot);
 }
 
 function crEmotionTagDefault(slot: string) : string
@@ -12733,42 +13001,60 @@ async function crSetSlotTag(char: Character, slot: string, tag: string) : Promis
 
 type CrCastCard = Character | User;
 
-function crAssembleCharacterPrompt(char: CrCastCard, purpose: "avatar" | "illustrate", only?: { setId: string; variantId: string }) : { visuals: string; uc: string }
+// [CR-IMGV5] Identity, then this image's state, then what they wear, then their sets. mods.wears replaces the
+// active outfits (and their UC) for one image; mods.hides drops card tags the framing cannot show; mods.only
+// draws one set variant. A call without mods is unchanged.
+type CrCaptionMods = { state?: string; wears?: string; hides?: string[]; only?: { setId: string; variantId: string } };
+
+function crAssembleCharacterPrompt(char: CrCastCard, purpose: "avatar" | "illustrate", mods?: CrCaptionMods) : { visuals: string; uc: string }
 {
   const card: CrImgCard = (char.cr && char.cr.img) ? char.cr.img : {};
-  const vis: string[] = [];
+  const m: CrCaptionMods = mods || {};
+  const head: string[] = [];
+  const dress: string[] = [];
   const uc: string[] = [];
 
   const universal = (card.universalPrompt || "").trim();
-  vis.push(universal || crCharacterAppearance(char));
+  head.push(universal || crCharacterAppearance(char));
   if (card.universalUC){
     uc.push(card.universalUC);
   }
 
   if (purpose === "avatar"){
-    if (card.avatarPrompt){ vis.push(card.avatarPrompt); }
+    if (card.avatarPrompt){ head.push(card.avatarPrompt); }
     if (card.avatarUC){ uc.push(card.avatarUC); }
   }
   else {
-    if (card.illustratorPrompt){ vis.push(card.illustratorPrompt); }
+    if (card.illustratorPrompt){ head.push(card.illustratorPrompt); }
     if (card.illustratorUC){ uc.push(card.illustratorUC); }
   }
 
-  const outfits = card.outfits || [];
-  for (let i = 0; i < outfits.length; i++){
-    if (!outfits[i].active){
-      continue;
+  if (m.wears && m.wears.trim()){
+    dress.push(m.wears.trim());
+  }
+  else {
+    const outfits = card.outfits || [];
+    for (let i = 0; i < outfits.length; i++){
+      if (!outfits[i].active){
+        continue;
+      }
+      if (outfits[i].prompt){ dress.push(outfits[i].prompt); }
+      if (outfits[i].uc){ uc.push(outfits[i].uc); }
     }
-    if (outfits[i].prompt){ vis.push(outfits[i].prompt); }
-    if (outfits[i].uc){ uc.push(outfits[i].uc); }
   }
 
-  const setPairs = crSetImagePairs(char, only);
-  vis.push(...setPairs.prompt);
+  const setPairs = crSetImagePairs(char, m.only);
   uc.push(...setPairs.uc);
 
+  const hides = m.hides || [];
+  const parts = [
+    crDropTags(head.filter((p) => p && p.trim()).join(", "), hides),
+    (m.state || "").trim(),
+    crDropTags(dress.filter((p) => p && p.trim()).join(", "), hides),
+    crDropTags(setPairs.prompt.filter((p) => p && p.trim()).join(", "), hides)
+  ];
   return {
-    visuals: vis.filter((p) => p && p.trim()).join(", "),
+    visuals: parts.filter((p) => p && p.trim()).join(", "),
     uc: uc.filter((p) => p && p.trim()).join(", ")
   };
 }
@@ -12851,7 +13137,9 @@ async function crGenerateSlot(char: CrCastCard, slot: string) : Promise<void>
     charId: char.id,
     slot: slot,
     uuid: uuid,
-    prompt: [tag, slot === CR_SLOT_BANNER ? "wide shot, full body, scenery" : "portrait, upper body"].filter(Boolean).join(", "),
+    prompt: slot === CR_SLOT_BANNER
+      ? crCountTags([crKind(char)]).concat(["solo", tag, "wide shot, full body, scenery"]).filter(Boolean).join(", ")
+      : crCountTags([crKind(char)]).concat(["solo", "upper body", tag || "looking at viewer"]).join(", "),
     extraBaseVisuals: base.base,
     extraBaseUC: base.uc,
     characters: [{ name: char.name || "character", visuals: character.visuals, uc: character.uc }],
@@ -12863,7 +13151,7 @@ async function crGenerateSlot(char: CrCastCard, slot: string) : Promise<void>
       steps: crImgSettings.steps,
       seed: seed,
       quality: compiled.quality,
-      negative: compiled.negative
+      negative: compiled.negative, qualityLast: true, siteParams: true
     }
   });
   crGenReqNote(slot, char.id, "", {
@@ -12914,7 +13202,7 @@ async function crGenerateBanner(scenario: Scenario) : Promise<void>
       steps: crImgSettings.steps,
       seed: seed,
       quality: compiled.quality,
-      negative: compiled.negative
+      negative: compiled.negative, qualityLast: true, siteParams: true
     }
   });
   try{ await api.v1.ui.toast("Generating the banner…", { type: "info", autoClose: 2500 }); }
@@ -12930,37 +13218,101 @@ const CR_ARCH_CTX_DEFAULT = 4;
 const CR_ARCH_CTX_MIN = 1;
 const CR_ARCH_CTX_MAX = 20;
 
-const CR_ARCH_INSTRUCTION = "You are an image prompt architect for NovelAI Diffusion V4.5 and V5.\n\n" +
-  "WHAT YOU ARE GIVEN AND WHAT YOU MUST NOT REPEAT. Each character's appearance is delivered " +
-  "to the renderer separately, in its own scoped caption. So is the location's look, and so is " +
-  "anything a character is carrying. NEVER describe a character's hair, eyes, skin, build, " +
-  "species, face, clothing or equipment. NEVER describe the fixed appearance of the setting. " +
-  "Restating them here applies them to the WHOLE image and bleeds one character's traits onto " +
-  "another, which is the single worst thing you can do.\n\n" +
-  "YOUR JOB IS EVERYTHING THAT CHANGES: framing, camera, composition, who is doing what, " +
-  "expressions, poses, contact between bodies, where people are relative to each other and to " +
-  "the frame, light, weather, time of day, and any state the scene has put on them \u2014 wet, " +
-  "bloodied, dishevelled, lit from one side.\n\n" +
-  "OUTPUT SHAPE. Comma-separated tags first, then prose, in one block:\n" +
-  "1. Subject count first (1girl, 2boys, 1other), then camera and composition tags (from below, " +
-  "close-up, wide shot, over-the-shoulder, dutch angle), then lighting and environment mood " +
-  "tags. Danbooru style, lowercase, comma separated.\n" +
-  "2. Then two to four sentences of plain prose describing the moment: the action, the " +
-  "expressions, the positions, what the light is doing. Write it as an observer describing a " +
-  "photograph, present tense. V5 leans on this prose and V4.5 still reads it, so it carries the " +
-  "scene \u2014 the tags only set the frame.\n\n" +
-  "POSITION IS PROSE, NEVER COORDINATES. Say who is on the left, who is behind, who is closer " +
-  "to the camera. Do not emit numbers, coordinates, or position syntax of any kind.\n\n" +
-  "NEVER EMIT WEIGHTS. No `::`, no numeric emphasis, no brackets or braces around any term. A " +
-  "weight you invent will ruin the render.\n\n" +
-  "RATING. Omit any rating tag for ordinary scenes. Only when the scene is genuinely sexual or " +
-  "graphically violent, add the appropriate rating tag \u2014 and in that case ALSO add the " +
-  "conventional Danbooru tags for the specific acts, positions and states depicted, alongside " +
-  "the prose. Be explicit and specific in the tags; the prose alone will not carry it.\n\n" +
-  "Output ONLY the prompt text. No headers, no bullets, no commentary, no quotation marks.";
+// [CR-IMGV5] The prompt writers. One format for V4.5 and V5; the script decides everything mechanical
+// (CR-IMAGE-PROMPTS v1.2). They run on GLM-4.6 with thinking off, at a format-keeping temperature.
+const CR_IMG_TEXT_MODEL = "glm-4-6";
+const CR_IMG_TEXT_TEMP = 0.5;
 
-const CR_ARCH_FRAME_RULES = "\n\nReminders: do not describe how anyone looks and do not name " +
-  "them. Tags first, then two to four sentences of prose. No weights, no coordinates.";
+const CR_ARCH_CORE = [
+  "You write the scene part of an image prompt for NovelAI Diffusion. The same prompt must work on V4.5 and V5. Each person's looks and clothes, and the location's fixed look, come from their own prompts elsewhere in the program. You write only what this one moment adds.",
+  "",
+  "ONE MOMENT",
+  "Draw the latest thing that happens in the text, frozen in one instant. If the last lines are only talk, draw what the speakers are doing while they talk.",
+  "",
+  "NEVER WRITE",
+  "- How anyone looks: hair, eyes, skin, body, species, face, clothes, gear. Written here, it lands on everyone in the frame.",
+  "- Names, except right after @. The image model never sees them. Use each person's handle.",
+  "- Anything that cannot be seen: thoughts, backstory, sounds, smells, the names of feelings. Show the feeling instead: grief is tears, frown, hand covering face.",
+  "- The words camera, photo, photograph, picture or image. Say viewer.",
+  "- Quality, style, artist, year or complexity tags. They are added later.",
+  "- Weights and syntax: no ::, no square brackets or braces, no | character, no coordinates or measurements.",
+  "- Quotation marks, except around words written on something in the scene, one short piece at most. Never quote dialogue.",
+  "",
+  "TAGS",
+  "Lowercase Danbooru tags, comma separated. Use only tags you are sure exist; if unsure, write it in a sentence instead. Never use two tags from a group marked \"one\".",
+  "framing, one: close-up, portrait, upper body, cowboy shot, full body, wide shot",
+  "Close-up shows the face, portrait head and shoulders, upper body to the waist, cowboy shot to mid-thigh, full body head to feet, wide shot people small in the place.",
+  "angle: from above, from below, from side, from behind, straight-on, pov, dutch angle",
+  "time and weather: day, night, evening, sunset, sunrise, twilight, rain, snowing, fog, overcast",
+  "light: sunlight, moonlight, backlighting, sidelighting, candlelight, neon lights, spotlight, light rays, dappled sunlight, dark, shadow",
+  "background, one: detailed background, blurry background, simple background",
+  "posture, one per person: standing, sitting, lying, kneeling, squatting, on back, on side, on stomach, sitting sideways",
+  "gesture: crossed legs, knees up, arms up, outstretched hand, hand on own cheek, head rest, arm support, hugging own legs, holding phone",
+  "gaze, one per person: looking at viewer, looking at another, looking away, looking down, looking up, looking to the side; closed eyes or looking back may join one",
+  "expression: smile, grin, smirk, frown, pout, blush, open mouth, clenched teeth, tears, crying, laughing, surprised, angry, sad, scared, embarrassed, nervous, sleepy, expressionless",
+  "state: wet, wet hair, wet clothes, sweat, blood, dirty, torn clothes, messy hair, bandages",
+  "touch, written source# on the one who acts, target# on the one who receives, mutual# when both do it: hug, kiss, headpat, holding hands, carrying, feeding, hand on another's shoulder, hand on another's cheek",
+  "",
+  "SENTENCES",
+  "After the tags, two to four short plain sentences. Start each with a handle, never he, she or they, and leave out the articles the and a. Say where each person is in the frame (left, right, center, foreground, background), what their hands do, which body parts touch, and where the light comes from. Plain words, no poetry.",
+  "",
+  "EXPLICIT SCENES",
+  "Everyone shown is an adult. When the moment is sexual or graphically violent, use the plain Danbooru tags for the acts, positions and exposure shown; sentences alone will not carry it."
+].join("\n");
+
+const CR_ARCH_FORMAT = [
+  "OUTPUT",
+  "No headings, nothing else.",
+  "First one block: the tags, then the sentences. Tags in this order: people count, framing, angle, setting, time, weather, light, background, rating.",
+  "People count: count the listed people who can be seen, using each one's girl, boy or other: 1girl, 2girls, 1boy, 1other. Add solo when there is one person. No people: no humans.",
+  "Setting tags (indoors, bedroom, outdoors, street) only when the message says no location is given.",
+  "One person: their posture, gaze and expression go in the tags.",
+  "Two or more: leave posture and expression out of the tags, and give each person theirs in their own sentence, in tag words.",
+  "Rating, always the last tag: rating:general for ordinary moments, rating:sensitive for suggestive ones, rating:questionable or rating:explicit for sexual ones.",
+  "Then, on new lines, one line for each listed person who can be seen:",
+  "@Name: that person's posture, gaze, expression, touch tags and state, as tags",
+  "When two or more people are visible, put (left), (center) or (right) after the name.",
+  "Only if the text says someone's clothes differ from usual right now (changed clothes, swimsuit, towel, half-dressed, nude), add a line @Name wears: everything visible they have on, as tags.",
+  "",
+  "EXAMPLE (other people, other place, no location given; copy only the shape)",
+  "2girls, cowboy shot, from side, indoors, kitchen, morning, sunlight, detailed background, rating:general. Fox girl stands at left by stove, grinning, holding out spoon toward girl with glasses. Girl with glasses sits on counter at right, leaning back, laughing with closed eyes. Sunlight from window behind fox girl rims both in warm light.",
+  "@Rin (left): standing, grin, looking at another, source#feeding",
+  "@Mei (right): sitting, laughing, closed eyes, target#feeding"
+].join("\n");
+
+const CR_ARCH_PHOTO = [
+  "THIS MOMENT IS A PHONE PICTURE one listed person took and sent in a chat. Make it casual and handheld, in whatever light the place has, unless the description asks for something posed. First decide who can be seen:",
+  "- Selfie: the sender, holding the phone toward themself. Tags: selfie, holding phone, upper body or portrait, often from above.",
+  "- Mirror selfie: mirror, reflection, holding phone.",
+  "- Someone else took it: the sender, framed casually.",
+  "- What the sender is looking at: pov, plus pov hands if their hands show. The sender is not visible and gets no @ line.",
+  "- No one: no humans.",
+  "Draw the place, things and light the description names."
+].join("\n");
+
+const CR_ARCH_INSTRUCTION = CR_ARCH_CORE + "\n\n" + CR_ARCH_FORMAT;
+const CR_ARCH_PHOTO_INSTRUCTION = CR_ARCH_CORE + "\n\n" + CR_ARCH_FORMAT + "\n\n" + CR_ARCH_PHOTO;
+
+function crArchParams(maxTokens: number) : any
+{
+  return { model: CR_IMG_TEXT_MODEL, max_tokens: maxTokens, temperature: CR_IMG_TEXT_TEMP, enable_thinking: false };
+}
+
+function crPeopleBlock(cast: CrCastCard[], senderId?: string) : string
+{
+  if (!cast.length){
+    return "People: none listed. If anyone can be seen, start the tags with their count, give each a plain handle "
+      + "with one or two looks the story states, such as woman in red coat, and write no @ lines.";
+  }
+  return "People (their looks are drawn separately):\n" + crCastLines(cast, senderId);
+}
+
+function crLocationLine() : string
+{
+  return crSceneBasePrompt().base
+    ? "Location: drawn separately. Add only time, weather and light."
+    : "Location: none given.";
+}
 
 await api.v1.storage.setIfAbsent(CR_ARCH_CTX_KEY, CR_ARCH_CTX_DEFAULT);
 
@@ -13016,9 +13368,9 @@ function crEscapeForRegex(s: string) : string
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function crDetectCast(text: string) : Character[]
+function crDetectCast(text: string) : CrCastCard[]
 {
-  const found: Character[] = [];
+  const found: CrCastCard[] = [];
   if (!text){
     return found;
   }
@@ -13039,12 +13391,23 @@ function crDetectCast(text: string) : Character[]
       found.push(c);
     }
   }
+  // [CR-IMGV5] The paired User is a person in the scene too when the text names them.
+  const u = crLiveUser();
+  if (u && u.name && u.name.trim().length > 1){
+    try{
+      if (new RegExp("\\b" + crEscapeForRegex(u.name.trim()) + "\\b", "i").test(text)){
+        found.push(u);
+      }
+    }
+    catch (e){
+    }
+  }
   return found;
 }
 
 type CrScanResult = {
   prompt: string;
-  cast: Character[];
+  cast: CrCastCard[];
   storyText: string;
 };
 
@@ -13057,24 +13420,14 @@ async function crArchitectScene(sections?: number) : Promise<CrScanResult | null
     return null;
   }
   const cast = crDetectCast(storyText);
-  const castBlock = cast.length > 0
-    ? "\n\nIn the scene (their appearance is supplied to the renderer separately — name " +
-      "them and say what they do, do not describe how they look):\n" +
-      cast.map((c) => "- " + c.name).join("\n")
-    : "";
 
   try{
-    const genParams = await api.v1.generationParameters.get();
     const messages: APIMessage[] = [
       { role: "system", content: CR_ARCH_INSTRUCTION },
-      { role: "user", content: "Current scene:\n" + storyText.trim() + castBlock +
-                               CR_ARCH_FRAME_RULES + "\n\nGenerate the image prompt:" }
+      { role: "user", content: "Story:\n" + storyText.trim() + "\n\n" + crPeopleBlock(cast) + "\n" +
+                               crLocationLine() + "\n\nWrite the prompt." }
     ];
-    const response = await crSideGenerate(messages, {
-      model: genParams.model,
-      max_tokens: 320 + (cast.length * 60),
-      temperature: 0.7
-    });
+    const response = await crSideGenerate(messages, crArchParams(320 + (cast.length * 60)));
     const raw = (response && response.choices && response.choices[0] && response.choices[0].text)
       ? String(response.choices[0].text)
       : "";
@@ -13108,102 +13461,403 @@ function crStripArchNoise(raw: string) : string
   return out.trim();
 }
 
-// [KIT-FROM-CE]
-type CrEnhanceCastIn = { id: string; name: string; visuals: string };
-type CrEnhanceResult = { prompt: string; visuals: { id: string; name: string; visuals: string }[] };
+// [CR-IMGV5] Architect output -> base caption + per-character captions (CR-IMAGE-PROMPTS v1.2).
+//   <tags>. <Sentences.>                    the scene, rating tag last among the tags
+//   @Name (left): <posture, gaze, expression, touch tags, state>     one per visible person
+//   @Name wears: <outfit tags>              optional: replaces the worn outfits for this image
+// Count tags, solo, who gets a caption, framing-hidden card tags, names -> handles, weights and
+// pipes, card-tag bleed, rating placement and positions are decided here, not by the model.
+// No @ lines and no "no humans" = the model skipped them: the text is used as written (scrubbed),
+// with its own count, and every listed person gets a caption, as in engine 1.0.0.
 
-function crExtractJSON(raw: string) : any
+type CrKind = "girl" | "boy" | "other";
+
+type CrScenePerson = {
+  card: CrCastCard;
+  pos: string;
+  state: string;
+  wears: string;
+  hides: string[];
+};
+
+type CrSceneParsed = {
+  scene: string;
+  rating: string;
+  people: CrScenePerson[];
+  noHumans: boolean;
+  unknown: string[];
+};
+
+type CrSceneBuilt = {
+  prompt: string;
+  characters: { name: string; visuals: string; uc: string; center?: { x: number; y: number } }[];
+  extraUC: string[];
+  visibleIds: string[];
+  legacy: boolean;
+};
+
+const CR_SCENE_NSFW_GUARD = true;
+
+const CR_SCENE_POS_X: Record<string, number> = {
+  "far left": 0.1, "left": 0.3, "center": 0.5, "middle": 0.5, "right": 0.7, "far right": 0.9
+};
+const CR_SCENE_POS_Y = 0.5;
+
+const CR_FRAMING_TAGS = ["close-up", "portrait", "upper body", "cowboy shot", "full body",
+                         "full-length portrait", "wide shot", "very wide shot"];
+
+function crKind(c: CrCastCard) : CrKind
 {
-  let text = String(raw || "");
-  text = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
-  text = text.replace(/<\/?think>/gi, "");
-  const fence = text.match(/```[a-z]*\n([\s\S]*?)```/i);
-  if (fence && fence[1]){
-    text = fence[1];
-  }
-  const start = text.indexOf("{");
-  if (start < 0){
-    return null;
-  }
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < text.length; i++){
-    const ch = text.charAt(i);
-    if (inStr){
-      if (esc){ esc = false; }
-      else if (ch === "\\"){ esc = true; }
-      else if (ch === "\""){ inStr = false; }
-      continue;
-    }
-    if (ch === "\""){ inStr = true; }
-    else if (ch === "{"){ depth++; }
-    else if (ch === "}"){
-      depth--;
-      if (depth === 0){
-        try{ return JSON.parse(text.slice(start, i + 1)); }
-        catch (e){ return null; }
-      }
-    }
-  }
-  return null;
+  const g = String(c.gender || "").toLowerCase();
+  if (/\b(f|female|woman|girl|lady|feminine)\b/.test(g)){ return "girl"; }
+  if (/\b(m|male|man|boy|guy|masculine)\b/.test(g)){ return "boy"; }
+  const card: CrImgCard = (c.cr && c.cr.img) ? c.cr.img : {};
+  const first = String(card.universalPrompt || "").split(",")[0].trim().toLowerCase();
+  if (first === "girl" || first === "1girl"){ return "girl"; }
+  if (first === "boy" || first === "1boy"){ return "boy"; }
+  return "other";
 }
 
-async function crEnhanceScene(prompt: string, cast: CrEnhanceCastIn[]) : Promise<CrEnhanceResult | null>
+function crHandle(c: CrCastCard) : string
+{
+  const card: any = (c.cr && c.cr.img) ? c.cr.img : {};
+  const set = String(card.handle || "").trim().toLowerCase();
+  if (set){
+    return set;
+  }
+  const kind = crKind(c);
+  const noun = kind === "girl" ? "girl" : kind === "boy" ? "man" : "figure";
+  const sp = String(c.species || "").trim().toLowerCase().replace(/[^a-z \-']/g, "");
+  if (sp && sp !== "human" && sp.split(/\s+/).length <= 3){
+    return /\b(girl|boy|woman|man|lady|guy)$/.test(sp) ? sp : (sp + " " + noun);
+  }
+  return kind === "girl" ? "woman" : noun;
+}
+
+function crCastLines(cast: CrCastCard[], senderId?: string) : string
+{
+  return cast.map((c) => "- " + (c.name || "unnamed") + ": " + crKind(c) + ". Handle: " +
+    crHandle(c) + "." + (senderId && c.id === senderId ? " Took the photo." : "")).join("\n");
+}
+
+function crSceneMatchCard(who: string, cast: CrCastCard[]) : CrCastCard | undefined
+{
+  const w = who.trim().toLowerCase().replace(/^the\s+/, "");
+  if (!w){
+    return undefined;
+  }
+  for (let i = 0; i < cast.length; i++){
+    const c: any = cast[i];
+    const names = [c.name, c.alias].filter((n) => n && String(n).trim());
+    for (let j = 0; j < names.length; j++){
+      if (String(names[j]).trim().toLowerCase() === w){ return cast[i]; }
+    }
+  }
+  for (let i = 0; i < cast.length; i++){
+    if (crHandle(cast[i]) === w){ return cast[i]; }
+  }
+  for (let i = 0; i < cast.length; i++){
+    const first = String(cast[i].name || "").trim().toLowerCase().split(/\s+/)[0];
+    if (first && first === w.split(/\s+/)[0]){ return cast[i]; }
+  }
+  return undefined;
+}
+
+function crScenePos(raw: string) : string
+{
+  const p = String(raw || "").trim().toLowerCase().replace(/\s+/g, " ");
+  return CR_SCENE_POS_X[p] !== undefined ? p : "";
+}
+
+function crParseScene(text: string, cast: CrCastCard[]) : CrSceneParsed
+{
+  const out: CrSceneParsed = { scene: "", rating: "", people: [], noHumans: false, unknown: [] };
+  const sceneParts: string[] = [];
+  const lines = String(text || "").split(/\r?\n/);
+  const at = /^@\s*([^:(\n]+?)\s*(?:\(([^)]*)\))?\s*(wears|hides)?\s*:\s*(.*)$/i;
+  const rate = /^rating\s*:\s*(general|sensitive|questionable|explicit)\b/i;
+
+  for (let i = 0; i < lines.length; i++){
+    const line = lines[i].trim();
+    if (!line){
+      continue;
+    }
+    const m = line.match(at);
+    if (m){
+      const card = crSceneMatchCard(m[1], cast);
+      if (!card){
+        out.unknown.push(m[1].trim());
+        continue;
+      }
+      let p = out.people.find((x) => x.card.id === card.id);
+      if (!p){
+        p = { card: card, pos: "", state: "", wears: "", hides: [] };
+        out.people.push(p);
+      }
+      const kind = String(m[3] || "").toLowerCase();
+      const body = m[4].trim().replace(/[.;]+$/, "");
+      if (kind === "wears"){
+        p.wears = body;
+      }
+      else if (kind === "hides"){
+        p.hides = crSplitTags(body);
+      }
+      else {
+        p.state = p.state ? (p.state + ", " + body) : body;
+        p.pos = crScenePos(m[2] || "") || p.pos;
+      }
+      continue;
+    }
+    const r = line.match(rate);
+    if (r){
+      out.rating = r[1].toLowerCase();
+      continue;
+    }
+    sceneParts.push(line.replace(/^scene\s*:\s*/i, ""));
+  }
+
+  let scene = "";
+  for (let i = 0; i < sceneParts.length; i++){
+    const part = sceneParts[i];
+    if (!scene){ scene = part; continue; }
+    const glue = (/[.!?,]$/.test(scene) || !/^[A-Z]/.test(part)) ? " " : ". ";
+    scene += glue + part;
+  }
+  const inline = /,?\s*\brating\s*:\s*(general|sensitive|questionable|explicit)\b/gi;
+  let im: RegExpExecArray | null;
+  while ((im = inline.exec(scene)) !== null){
+    if (!out.rating){ out.rating = im[1].toLowerCase(); }
+  }
+  scene = scene.replace(inline, "");
+  out.scene = scene.trim();
+  out.noHumans = /\bno humans\b/i.test(out.scene);
+  return out;
+}
+
+function crSplitTags(s: string) : string[]
+{
+  return String(s || "").split(",").map((t) => t.trim()).filter(Boolean);
+}
+
+function crTagKey(t: string) : string
+{
+  return t.trim().toLowerCase().replace(/_/g, " ").replace(/\s+/g, " ");
+}
+
+function crDedupeTags(tags: string[]) : string[]
+{
+  const seen: Record<string, boolean> = {};
+  return tags.filter((t) => {
+    const k = crTagKey(t);
+    if (seen[k]){ return false; }
+    seen[k] = true;
+    return true;
+  });
+}
+
+function crSplitTagsProse(scene: string) : { tags: string[]; prose: string }
+{
+  const s = String(scene || "").trim();
+  const m = s.match(/\.\s+/);
+  let head = m ? s.slice(0, m.index) : s.replace(/\.\s*$/, "");
+  let prose = m ? s.slice((m.index as number) + m[0].length).trim() : "";
+  if (head.indexOf(",") < 0 && head.split(/\s+/).length > 3 && /^[A-Z]/.test(head)){
+    prose = (head + ". " + prose).trim();
+    head = "";
+  }
+  return { tags: crSplitTags(head), prose: prose };
+}
+
+function crSceneScrub(scene: string, cast: CrCastCard[], extraNames: string[]) : string
+{
+  let s = String(scene || "");
+  s = s.replace(/-?\d+(\.\d+)?::/g, "").replace(/::/g, "");
+  s = s.replace(/[{}\[\]]/g, "").replace(/\s*\|+\s*/g, ", ");
+  s = s.replace(/[“”]/g, "\"");
+  const pairs: { name: string; handle: string }[] = [];
+  for (let i = 0; i < cast.length; i++){
+    const c: any = cast[i];
+    [c.name, c.alias].forEach((n: any) => {
+      if (n && String(n).trim().length > 1){ pairs.push({ name: String(n).trim(), handle: crHandle(cast[i]) }); }
+    });
+  }
+  extraNames.forEach((n) => { if (n && n.trim().length > 1){ pairs.push({ name: n.trim(), handle: "person" }); } });
+  pairs.sort((a, b) => b.name.length - a.name.length);
+  for (let i = 0; i < pairs.length; i++){
+    const handle = pairs[i].handle;
+    try{
+      s = s.replace(new RegExp("\\b" + crEscapeForRegex(pairs[i].name) + "\\b", "gi"),
+        (match: string, offset: number, whole: string) => {
+          const starts = offset === 0 || /[.!?]\s*$/.test(whole.slice(0, offset));
+          return starts ? handle.charAt(0).toUpperCase() + handle.slice(1) : handle;
+        });
+    }
+    catch (e){ }
+  }
+  return s.replace(/\s+/g, " ").replace(/\s+,/g, ",").replace(/,\s*,/g, ",").trim();
+}
+
+function crIsCountTag(t: string) : boolean
+{
+  return /^(\d+\+?(girl|boy|other)s?|solo|solo focus|multiple (girls|boys|others))$/i.test(t.trim());
+}
+
+function crCountTags(kinds: CrKind[]) : string[]
+{
+  const n: Record<CrKind, number> = { girl: 0, boy: 0, other: 0 };
+  kinds.forEach((k) => { n[k]++; });
+  const out: string[] = [];
+  (["girl", "boy", "other"] as CrKind[]).forEach((k) => {
+    if (n[k] === 1){ out.push("1" + k); }
+    else if (n[k] > 1 && n[k] < 6){ out.push(n[k] + k + "s"); }
+    else if (n[k] >= 6){ out.push("6+" + k + "s"); }
+  });
+  return out;
+}
+
+function crDropTags(s: string, drop: string[]) : string
+{
+  if (!drop || drop.length === 0){
+    return s;
+  }
+  const kill: Record<string, boolean> = {};
+  drop.forEach((d) => { kill[crTagKey(d)] = true; });
+  return crSplitTags(s).filter((t) => !kill[crTagKey(t)]).join(", ");
+}
+
+const CR_HIDE_FEET = /(^| )(shoes|boots|sneakers|sandals|heels|slippers|loafers|pumps|flip-flops|geta|zouri|uwabaki|mary janes|footwear|socks|kneehighs|anklet|toenail polish|toenails|toes|toe ring|soles|feet|barefoot|no shoes)$/;
+const CR_HIDE_LEGS = /(^| )(thighhighs|thighhigh|pantyhose|leggings|legwear|thigh strap|garter straps|garter belt|leg warmers|fishnets|zettai ryouiki|knees|kneepits|leg ribbon)$/;
+const CR_HIDE_HIPS = /(^| )(skirt|miniskirt|microskirt|shorts|pants|jeans|trousers|panties|bikini bottom|belt|hakama|bloomers|overalls|loincloth|sarong)$/;
+const CR_HIDE_EYES = /(^| )(eyes|pupils|sclera|heterochromia)$/;
+const CR_EYES_NOT_COLOUR = /^(closed|half-closed|one eye closed|narrowed|wide|empty|sparkling|glowing|crazy|bags under) eyes$/;
+
+function crFramingOf(tags: string[]) : string
+{
+  for (let i = 0; i < tags.length; i++){
+    const k = crTagKey(tags[i]);
+    if (CR_FRAMING_TAGS.indexOf(k) >= 0){ return k; }
+  }
+  return "";
+}
+
+function crFrameHidden(cardTags: string[], framing: string, eyesClosed: boolean) : string[]
+{
+  const feet = framing === "close-up" || framing === "portrait" || framing === "upper body" || framing === "cowboy shot";
+  const legs = framing === "close-up" || framing === "portrait" || framing === "upper body";
+  const hips = framing === "close-up" || framing === "portrait";
+  return cardTags.filter((t) => {
+    const k = crTagKey(t);
+    if (k.indexOf("::") >= 0){ return false; }
+    if (feet && CR_HIDE_FEET.test(k)){ return true; }
+    if (legs && CR_HIDE_LEGS.test(k)){ return true; }
+    if (hips && CR_HIDE_HIPS.test(k)){ return true; }
+    if (eyesClosed && CR_HIDE_EYES.test(k) && !CR_EYES_NOT_COLOUR.test(k)){ return true; }
+    return false;
+  });
+}
+
+function crHasTag(tags: string[], tag: string) : boolean
+{
+  return tags.some((t) => crTagKey(t) === tag);
+}
+
+function crBuildScene(parsed: CrSceneParsed, cast: CrCastCard[], extraNames?: string[]) : CrSceneBuilt
+{
+  const legacy = parsed.people.length === 0 && !parsed.noHumans;
+  const built: CrSceneBuilt = { prompt: "", characters: [], extraUC: [], visibleIds: [], legacy: legacy };
+  const people: CrScenePerson[] = legacy
+    ? cast.map((c) => ({ card: c, pos: "", state: "", wears: "", hides: [] }))
+    : parsed.people;
+
+  const split = crSplitTagsProse(crSceneScrub(parsed.scene, cast, extraNames || []));
+
+  const cardKeys: Record<string, boolean> = {};
+  people.forEach((p) => {
+    crSplitTags(crAssembleCharacterPrompt(p.card, "illustrate").visuals)
+      .forEach((t) => { cardKeys[crTagKey(t)] = true; });
+  });
+  let tags = split.tags.filter((t) => !cardKeys[crTagKey(t)]);
+
+  const head: string[] = [];
+  if (!legacy){
+    tags = tags.filter((t) => !crIsCountTag(t));
+    if (people.length > 0){
+      head.push.apply(head, crCountTags(people.map((p) => crKind(p.card))));
+      if (people.length === 1){ head.push("solo"); }
+    }
+  }
+
+  const solo = !legacy && people.length === 1;
+  if (solo && people[0].state){
+    tags = tags.concat(crSplitTags(people[0].state).filter((t) => !crIsCountTag(t)));
+  }
+  tags = crDedupeTags(tags);
+
+  const framing = crFramingOf(tags);
+  const sceneEyesClosed = crHasTag(tags, "closed eyes") || crHasTag(tags, "sleeping");
+
+  const tight = framing === "close-up" || framing === "portrait";
+  const usePos = !legacy && !tight && people.length >= 2 && people.every((p) => !!p.pos);
+
+  for (let i = 0; i < people.length; i++){
+    const p = people[i];
+    const stateTags = crSplitTags(p.state);
+    const eyesClosed = crHasTag(stateTags, "closed eyes") || crHasTag(stateTags, "sleeping") ||
+                       (solo && sceneEyesClosed);
+    const cardTags = crSplitTags(crAssembleCharacterPrompt(p.card, "illustrate", { wears: p.wears }).visuals);
+    const a = crAssembleCharacterPrompt(p.card, "illustrate", {
+      state: solo ? "" : p.state,
+      wears: p.wears,
+      hides: p.hides.concat(crFrameHidden(cardTags, framing, eyesClosed))
+    });
+    if (!a.visuals){
+      continue;
+    }
+    const ch: any = { name: p.card.name || "character", visuals: a.visuals, uc: a.uc };
+    if (usePos){
+      ch.center = { x: CR_SCENE_POS_X[p.pos], y: CR_SCENE_POS_Y };
+    }
+    built.characters.push(ch);
+    built.visibleIds.push(p.card.id);
+  }
+
+  let prompt = head.concat(tags).join(", ");
+  if (split.prose){
+    const prose = /[.!?]$/.test(split.prose) ? split.prose : (split.prose + ".");
+    prompt = prompt ? (prompt + ". " + prose) : prose;
+  }
+  if (parsed.rating){
+    prompt = split.prose
+      ? (prompt + " rating:" + parsed.rating)
+      : (prompt ? prompt.replace(/[,\s]+$/, "") + ", " : "") + "rating:" + parsed.rating;
+  }
+  built.prompt = prompt.trim();
+
+  if (CR_SCENE_NSFW_GUARD && (parsed.rating === "general" || parsed.rating === "sensitive")){
+    built.extraUC.push("nsfw");
+  }
+  return built;
+}
+
+// [CR-IMGV5] Enhance turns a rough idea into the same format Scan writes. It never sees the captions, so it
+// cannot echo anyone's looks back; the script builds every caption.
+async function crEnhanceScene(prompt: string, cast: CrCastCard[]) : Promise<string | null>
 {
   const text = String(prompt || "").trim();
   if (!text){
     return null;
   }
-  const list = cast || [];
-  const castLines = list.map(function(c, i){
-    const label = "Character " + (i + 1) + (c.name && c.name.trim() ? " (" + c.name.trim() + ")" : " (unnamed)");
-    return c.visuals && c.visuals.trim()
-      ? "\n" + label + ": Known visuals are \"" + c.visuals.trim() + "\". Refine these in " +
-        "char_visuals; do not repeat them in enhanced_prompt."
-      : "\n" + label + ": No known visuals. Write appropriate tags in char_visuals; do not " +
-        "repeat them in enhanced_prompt.";
-  });
-
-  const sys = "You write prompts for an anime-style image generator. Output ONLY a valid " +
-    "JSON object, no markdown:\n{\n" +
-    "  \"enhanced_prompt\": \"The scene, as comma-separated visual tags. How many people are " +
-    "in it, the setting, the time of day, the lighting, what is happening, the shot and the " +
-    "angle. Do NOT describe any character's face, hair, eyes, skin, build, species or " +
-    "clothing -- those are carried separately. No sentences, no weights, no :: and no " +
-    "brackets.\",\n" +
-    "  \"char_visuals\": [\"Appearance tags for character 1 if present, else an empty " +
-    "string\", \"...character 2...\"]\n}\n" +
-    "The char_visuals array must have exactly " + list.length + " entries, in the same order " +
-    "as the characters listed below.";
-
   try{
-    const genParams = await api.v1.generationParameters.get();
     const messages: APIMessage[] = [
-      { role: "system", content: sys },
-      { role: "user", content: "Rough concept: " + text + castLines.join("") + "\n\nOutput the JSON:" }
+      { role: "system", content: CR_ARCH_INSTRUCTION },
+      { role: "user", content: "Rough idea (not a story; keep its intent and make it concrete):\n" + text + "\n\n" +
+                               crPeopleBlock(cast) + "\n" + crLocationLine() + "\n\nWrite the prompt." }
     ];
-    const response = await crSideGenerate(messages, {
-      model: genParams.model,
-      max_tokens: 280 + (list.length * 80),
-      temperature: 0.7
-    });
+    const response = await crSideGenerate(messages, crArchParams(300 + (cast.length * 70)));
     const raw = (response && response.choices && response.choices[0] && response.choices[0].text)
       ? String(response.choices[0].text)
       : "";
-    const parsed = crExtractJSON(raw);
-    if (!parsed){
-      throw new Error("no JSON object in the enhance response");
-    }
-    const cv: any[] = Array.isArray(parsed.char_visuals) ? parsed.char_visuals : [];
-    const enhanced = crStripArchNoise(String(parsed.enhanced_prompt || "")) || text;
-    return {
-      prompt: enhanced,
-      visuals: list.map(function(c, i){
-        const got = (cv[i] === undefined || cv[i] === null) ? "" : String(cv[i]).trim();
-        return { id: c.id, name: c.name, visuals: got || c.visuals };
-      })
-    };
+    return crStripArchNoise(raw) || null;
   }
   catch (e){
     api.v1.error("[CR:scan] enhance pass failed:", e);
@@ -13223,7 +13877,6 @@ type CrIllusState = {
   tab: "compose" | "gallery" | "presets" | "tags";
   prompt: string;
   cast: string[];
-  visuals: { [id: string]: string };
   scanning: boolean;
   enhancing: boolean;
   generating: boolean;
@@ -13233,15 +13886,9 @@ type CrIllusState = {
 };
 
 let crIllus: CrIllusState = {
-  tab: "compose", prompt: "", cast: [], visuals: {}, scanning: false, enhancing: false,
+  tab: "compose", prompt: "", cast: [], scanning: false, enhancing: false,
   generating: false, lastUuid: "", lastAt: 0, note: ""
 };
-
-function crIllusVisualsFor(char: CrCastCard, assembled: string) : string
-{
-  const over = crIllus.visuals[char.id];
-  return (over && over.trim()) ? over.trim() : assembled;
-}
 
 function crIllusCastChars() : CrCastCard[]
 {
@@ -13261,12 +13908,62 @@ function crIllusToggle(id: string)
   const at = crIllus.cast.indexOf(id);
   if (at >= 0){
     crIllus.cast.splice(at, 1);
-    delete crIllus.visuals[id];
   }
   else if (crIllus.cast.length < CR_ILLUS_MAX_CAST){
     crIllus.cast.push(id);
   }
   crTouch();
+}
+
+// Names the image model must never see but that belong to nobody in the cast (the User, when not picked).
+function crSceneExtraNames(cast: CrCastCard[]) : string[]
+{
+  const user = crLiveUser();
+  return (user && user.name && !cast.some((c) => c.id === user.id)) ? [user.name] : [];
+}
+
+// [CR-IMGV5] What Generate sends. Everyone picked is drawn: an @ line gives them their pose, and a picked
+// person the text has no @ line for is still drawn, standing in the count.
+function crIllusBuild(cast: CrCastCard[]) : CrSceneBuilt
+{
+  const parsed = crParseScene(crIllus.prompt, cast);
+  if (parsed.people.length > 0 && !parsed.noHumans){
+    for (let i = 0; i < cast.length; i++){
+      if (!parsed.people.some((p) => p.card.id === cast[i].id)){
+        parsed.people.push({ card: cast[i], pos: "", state: "", wears: "", hides: [] });
+      }
+    }
+  }
+  return crBuildScene(parsed, cast, crSceneExtraNames(cast));
+}
+
+// A POV shot with no @ lines shows nobody from the cast: the one holding the phone gets no @ line.
+function crScenePovNobody(parsed: CrSceneParsed) : void
+{
+  if (parsed.people.length === 0 && /(^|[\s,])pov([\s,.]|$)/i.test(parsed.scene)){
+    parsed.noHumans = true;
+  }
+}
+
+// Who the text shows: the @ lines when there are any (or none at all for "no humans" or a POV), else everyone found.
+function crIllusShown(text: string, found: CrCastCard[]) : { shown: CrCastCard[]; unknown: string[] }
+{
+  const parsed = crParseScene(text, found);
+  crScenePovNobody(parsed);
+  const shown = (parsed.people.length > 0 || parsed.noHumans) ? parsed.people.map((p) => p.card) : found;
+  return { shown: shown, unknown: parsed.unknown };
+}
+
+function crIllusCastNote(shown: CrCastCard[], unknown: string[]) : string
+{
+  const bits: string[] = [];
+  if (shown.length > CR_ILLUS_MAX_CAST){
+    bits.push("Found " + shown.length + " people in view; kept the first " + CR_ILLUS_MAX_CAST + ".");
+  }
+  if (unknown.length > 0){
+    bits.push(unknown.join(", ") + (unknown.length === 1 ? " has" : " have") + " no card, so the scene text carries them.");
+  }
+  return bits.join(" ");
 }
 
 async function crIllusScan() : Promise<void>
@@ -13281,11 +13978,9 @@ async function crIllusScan() : Promise<void>
     const result = await crArchitectScene();
     if (result){
       crIllus.prompt = result.prompt;
-      crIllus.cast = result.cast.slice(0, CR_ILLUS_MAX_CAST).map((c) => c.id);
-      crIllus.visuals = {};
-      crIllus.note = result.cast.length > CR_ILLUS_MAX_CAST
-        ? ("Found " + result.cast.length + " Contacts; kept the first " + CR_ILLUS_MAX_CAST + ".")
-        : "";
+      const seen = crIllusShown(result.prompt, result.cast);
+      crIllus.cast = seen.shown.slice(0, CR_ILLUS_MAX_CAST).map((c) => c.id);
+      crIllus.note = crIllusCastNote(seen.shown, seen.unknown);
     }
     else {
       crIllus.note = "The scan returned nothing.";
@@ -13312,23 +14007,18 @@ async function crIllusEnhance() : Promise<void>
   crTouch();
   try{
     const cast = crIllusCastChars();
-    const input: CrEnhanceCastIn[] = cast.map((c) => ({
-      id: c.id,
-      name: c.name || "",
-      visuals: crIllusVisualsFor(c, crAssembleCharacterPrompt(c, "illustrate").visuals)
-    }));
-    const result = await crEnhanceScene(crIllus.prompt, input);
-    if (result){
-      crIllus.prompt = result.prompt;
-      for (let i = 0; i < result.visuals.length; i++){
-        const v = result.visuals[i];
-        if (v.visuals && v.visuals.trim()){
-          crIllus.visuals[v.id] = v.visuals.trim();
-        }
+    const named = crDetectCast(crIllus.prompt);
+    for (let i = 0; i < named.length; i++){
+      if (!cast.some((c) => c.id === named[i].id)){
+        cast.push(named[i]);
       }
-      crIllus.note = cast.length > 0
-        ? "Enhanced. The character prompts below are this scene's version — the cards are unchanged."
-        : "Enhanced.";
+    }
+    const result = await crEnhanceScene(crIllus.prompt, cast);
+    if (result){
+      crIllus.prompt = result;
+      const seen = crIllusShown(result, cast);
+      crIllus.cast = seen.shown.slice(0, CR_ILLUS_MAX_CAST).map((c) => c.id);
+      crIllus.note = crIllusCastNote(seen.shown, seen.unknown) || "Enhanced.";
     }
     else {
       crIllus.note = "Enhance returned nothing usable.";
@@ -13360,30 +14050,29 @@ async function crIllusGenerate() : Promise<void>
   crTouch();
   try{
     const cast = crIllusCastChars();
+    const built = crIllusBuild(cast);
     const compiled = crCompileImgFields();
-    const characters: any[] = [];
     const baseBits: string[] = [];
     const baseUCBits: string[] = [];
     const scene = crSceneBasePrompt();
     if (scene.base){ baseBits.push(scene.base); }
     if (scene.uc){ baseUCBits.push(scene.uc); }
     for (let i = 0; i < cast.length; i++){
-      const assembled = crAssembleCharacterPrompt(cast[i], "illustrate");
-      const visuals = crIllusVisualsFor(cast[i], assembled.visuals);
-      if (visuals){
-        characters.push({ name: cast[i].name || "character", visuals: visuals, uc: assembled.uc });
+      if (built.visibleIds.indexOf(cast[i].id) < 0){
+        continue;
       }
       const base = crAssembleBasePrompt(cast[i], "illustrate");
       if (base.base){ baseBits.push(base.base); }
       if (base.uc){ baseUCBits.push(base.uc); }
     }
+    baseUCBits.push.apply(baseUCBits, built.extraUC);
     const uuid = "cr-illus-" + Date.now();
     await crBridgeSend("GENERATE_IMAGE", {
       uuid: uuid,
-      prompt: crIllus.prompt.trim(),
+      prompt: built.prompt,
       extraBaseVisuals: baseBits.join(", "),
       extraBaseUC: baseUCBits.join(", "),
-      characters: characters,
+      characters: built.characters,
       settings: {
         model: crImgSettings.model,
         width: crImgSettings.width,
@@ -13392,7 +14081,7 @@ async function crIllusGenerate() : Promise<void>
         steps: crImgSettings.steps,
         seed: crImgSettings.seed,
         quality: compiled.quality,
-        negative: compiled.negative
+        negative: compiled.negative, qualityLast: true, siteParams: true
       }
     });
     crIllus.lastUuid = uuid;
@@ -13413,21 +14102,7 @@ function CrIllusComposer(props: { st: CrUiState }) : any
 {
   const mob = props.st.layout === "mobile";
   const cast = crIllusCastChars();
-  const preview: { id: string; name: string; text: string; enhanced: boolean }[] = [];
-  for (let i = 0; i < cast.length; i++){
-    const a = crAssembleCharacterPrompt(cast[i], "illustrate");
-    const over = crIllus.visuals[cast[i].id];
-    const text = crIllusVisualsFor(cast[i], a.visuals);
-    if (text){
-      preview.push({
-        id: cast[i].id,
-        name: cast[i].name,
-        text: text,
-        enhanced: !!(over && over.trim())
-      });
-    }
-  }
-  const anyEnhanced = preview.some((p) => p.enhanced);
+  const built = crIllusBuild(cast);
   const compiled = crCompileImgFields();
   const scene = crSceneBasePrompt();
   const liveScenario = crLiveScenario();
@@ -13447,7 +14122,7 @@ function CrIllusComposer(props: { st: CrUiState }) : any
   return h("div", { class: "cr-illus-compose" },
     h(CrSection, {
       title: "Scene",
-      note: "Scan reads the last few messages and writes a prompt here. Enhance rewrites whatever is in the box and refines each picked Contact's visuals for this scene only. Edit it freely — what is in this box is what gets sent."
+      note: "Scan reads the last few messages and writes a prompt here; Enhance turns a rough idea in the box into one. A line starting @Name gives that person's pose and expression, and @Name wears: replaces their outfit for this picture. Edit freely."
     }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
       h(CrTextArea, {
         value: crIllus.prompt,
@@ -13493,11 +14168,10 @@ function CrIllusComposer(props: { st: CrUiState }) : any
         }),
         h(CrButton, {
           text: "Clear",
-          disabled: !crIllus.prompt && !anyEnhanced,
+          disabled: !crIllus.prompt,
           onClick: () => {
             crIllus.prompt = "";
             crIllus.note = "";
-            crIllus.visuals = {};
             crTouch();
           }
         })
@@ -13506,7 +14180,7 @@ function CrIllusComposer(props: { st: CrUiState }) : any
 
     h(CrSection, {
       title: "Who is in it",
-      note: "Up to " + CR_ILLUS_MAX_CAST + ", Contacts or Users. Each one sends its own character prompt, built from Universal plus Illustrator plus any worn outfits — the Avatar pair is deliberately left out of scenes."
+      note: "Up to " + CR_ILLUS_MAX_CAST + ", Contacts or Users. Scan and Enhance pick the people in view; everyone picked is drawn. Each sends its own character prompt — Universal, Illustrator, worn outfits and sets; the Avatar pair is left out of scenes."
     }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
       charList.length === 0 && userList.length === 0
         ? h(CrEmpty, { text: "No cards yet." })
@@ -13532,24 +14206,16 @@ function CrIllusComposer(props: { st: CrUiState }) : any
       style: { marginTop: CR_S_3, color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" }
     }, scene.base || "(negative only)") : null),
 
-    preview.length > 0 ? h(CrSection, {
-      title: "Character prompts",
-      note: anyEnhanced
-        ? "A marked line is this scene's enhanced version. The Contact's card is untouched — revert to go back to it."
-        : "As assembled now. A Contact with nothing written is left out rather than drawn blank."
-    }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
-      h("div", {
-        style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" }
-      }, preview.map((p, i) => h("div", {
-        key: p.id,
-        style: { marginTop: i > 0 ? CR_S_1 : "0", color: p.enhanced ? CR_TEXT : CR_DIM }
-      }, (p.enhanced ? "● " : "") + p.name + ": " + p.text))),
-      anyEnhanced ? h("div", { style: { display: "flex", gap: CR_S_3, flexWrap: "wrap" } },
-        h(CrButton, {
-          text: "Revert to the cards",
-          onClick: () => { crIllus.visuals = {}; crTouch(); }
-        })
-      ) : null
+    crIllus.prompt.trim() ? h(CrSection, {
+      title: "What gets sent",
+      note: built.legacy
+        ? "The text has no @ lines, so everyone picked is drawn and the people count is the text's own."
+        : "Built from the @ lines: the count, who is drawn, each pose in that person's own caption, and card tags the framing hides left out."
+    }, h("div", { style: { marginTop: CR_S_3, color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.5", wordBreak: "break-word" } },
+      h("div", null, "Scene: " + (built.prompt || "(empty)")),
+      built.characters.map((c, i) => h("div", { key: built.visibleIds[i] || String(i), style: { marginTop: CR_S_1 } },
+        c.name + (c.center ? " (at " + c.center.x + ")" : "") + ": " + c.visuals)),
+      built.extraUC.length ? h("div", { style: { marginTop: CR_S_1 } }, "Negative adds: " + built.extraUC.join(", ")) : null
     )) : null,
 
     h(CrSection, {
@@ -14461,7 +15127,7 @@ async function crPostsImgAsk(char: Character, thread: ForumThread) : Promise<str
         + `Title: ${op.title || "Untitled"}\n${op.content || ""}` },
       { role: "system", content: `Answer with ONE line describing the photo ${char.name} would attach to it, `
         + `in plain words, as they would describe it to a friend. No tags, no keywords, no lists. `
-        + `Do not describe your own face or body. Say what is in the picture and where it was taken.` },
+        + `Do not describe your own face or body. Say what is in the picture and where it was taken. Say first whether you are in it.` },
       { role: "system", content: "[ Style: one line, plain description ]" },
       { role: "assistant", content: primer }
     ],
@@ -15180,10 +15846,10 @@ function crChatImgBrainText(userName: string) : string
   return "You may send a photo when it fits \u2014 a selfie, something you are looking at, or "
     + "anything " + them + " asks you to show. Do it when it is natural, and always when asked. "
     + "To send one, put this on its own line AFTER your message text: "
-    + "[Image: a clear description of what the photo shows]. Describe the shot in plain words "
-    + "\u2014 what you are doing, what you are wearing, where you are, how it is framed. Do not "
-    + "describe your own face or body; that is added automatically. Never send more than one "
-    + "photo in a message.";
+    + "[Image: a clear description of what the photo shows]. Start with who is in it: just you, "
+    + "you and someone, or no one. Then say what you are doing, where you are and how it is framed. "
+    + "Mention clothes only if they are not what you usually wear. Do not describe your own face or "
+    + "body; that is added automatically. Never send more than one photo in a message.";
 }
 
 async function crChatImgAddBrain(card: CrAnyCard, kind: CrCardKind) : Promise<void>
@@ -15209,9 +15875,12 @@ function crChatImgHasBrain(card: CrAnyCard) : boolean
   return brains.some((b) => String(b && b.name) === CR_CHATIMG_BRAIN_NAME);
 }
 
-type CrChatImgBuilt = { prompt: string; characters: { name: string; visuals: string; uc: string }[];
+type CrChatImgBuilt = { prompt: string; characters: { name: string; visuals: string; uc: string; center?: { x: number; y: number } }[];
                         base: string; baseUC: string };
 
+// [CR-IMGV5] A phone picture: the photo Architect decides who is in view (a POV shot or a picture of lunch shows
+// nobody), and the script builds the captions. The Scenario's location is left out: the photo was taken
+// wherever the description says.
 async function crChatImgBuildPrompt(desc: string, sender: Character) : Promise<CrChatImgBuilt | null>
 {
   const description = String(desc || "").trim();
@@ -15230,43 +15899,15 @@ async function crChatImgBuildPrompt(desc: string, sender: Character) : Promise<C
     }
   }
 
-  const characters: { name: string; visuals: string; uc: string }[] = [];
-  const baseBits: string[] = [];
-  const baseUCBits: string[] = [];
-  const scene = crSceneBasePrompt();
-  if (scene.base){ baseBits.push(scene.base); }
-  if (scene.uc){ baseUCBits.push(scene.uc); }
-  for (let i = 0; i < cast.length; i++){
-    const assembled = crAssembleCharacterPrompt(cast[i], "illustrate");
-    if (assembled.visuals){
-      characters.push({ name: cast[i].name || "character", visuals: assembled.visuals, uc: assembled.uc });
-    }
-    const base = crAssembleBasePrompt(cast[i], "illustrate");
-    if (base.base){ baseBits.push(base.base); }
-    if (base.uc){ baseUCBits.push(base.uc); }
-  }
-
-  const names = characters.map((c) => c.name).join(", ");
-  const ask = "Photo description:\n" + description
-    + "\n\nThis is a photo taken by " + (sender.name || "someone")
-    + " and sent in a message \u2014 compose it as a casual phone snapshot, handheld framing and "
-    + "available light, rather than a cinematic still, unless the description plainly asks for "
-    + "something else."
-    + (names ? "\n\nIn the shot (their appearance is supplied to the renderer separately \u2014 "
-             + "name them, do not describe how they look): " + names + "." : "")
-    + "\n\nGenerate the image prompt:";
+  const ask = "Description, written by " + (sender.name || "the sender") + ":\n" + description
+    + "\n\n" + crPeopleBlock(cast, sender.id) + "\nLocation: none given.\n\nWrite the prompt.";
 
   try{
-    const genParams = await api.v1.generationParameters.get();
     const messages: APIMessage[] = [
-      { role: "system", content: CR_ARCH_INSTRUCTION },
+      { role: "system", content: CR_ARCH_PHOTO_INSTRUCTION },
       { role: "user", content: ask }
     ];
-    const response = await crSideGenerate(messages, {
-      model: genParams.model,
-      max_tokens: CR_CHATIMG_MAX_TOKENS,
-      temperature: 0.7
-    });
+    const response = await crSideGenerate(messages, crArchParams(CR_CHATIMG_MAX_TOKENS));
     const raw = (response && response.choices && response.choices[0] && response.choices[0].text)
       ? String(response.choices[0].text)
       : "";
@@ -15274,7 +15915,24 @@ async function crChatImgBuildPrompt(desc: string, sender: Character) : Promise<C
     if (!prompt){
       return null;
     }
-    return { prompt: prompt, characters: characters,
+    const parsed = crParseScene(prompt, cast);
+    crScenePovNobody(parsed);
+    const built = crBuildScene(parsed, cast, crSceneExtraNames(cast));
+    if (!built.prompt){
+      return null;
+    }
+    const baseBits: string[] = [];
+    const baseUCBits: string[] = [];
+    for (let i = 0; i < cast.length; i++){
+      if (built.visibleIds.indexOf(cast[i].id) < 0){
+        continue;
+      }
+      const base = crAssembleBasePrompt(cast[i], "illustrate");
+      if (base.base){ baseBits.push(base.base); }
+      if (base.uc){ baseUCBits.push(base.uc); }
+    }
+    baseUCBits.push.apply(baseUCBits, built.extraUC);
+    return { prompt: built.prompt, characters: built.characters,
              base: baseBits.join(", "), baseUC: baseUCBits.join(", ") };
   }
   catch (e){
@@ -15300,7 +15958,7 @@ async function crChatImgDispatch(uuid: string, built: CrChatImgBuilt) : Promise<
       steps: crImgSettings.steps,
       seed: crImgSettings.seed,
       quality: compiled.quality,
-      negative: compiled.negative
+      negative: compiled.negative, qualityLast: true, siteParams: true
     }
   });
 }
