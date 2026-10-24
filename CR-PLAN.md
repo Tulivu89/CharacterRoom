@@ -1,6 +1,6 @@
 # CharacterRoom — Plan & Inventory (CR-PLAN)
 
-**Doc version** 0.80 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
+**Doc version** 0.81 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
 the last three are the random-name tables · **Target artifacts** `characterroom-vX.naiscript`
 (engine, LF) and the **shared bridge** — CE's bridge extended to serve both engines (D-15)
 
@@ -51,6 +51,7 @@ the last three are the random-name tables · **Target artifacts** `characterroom
 | D-25 | **CR 0.0.x ships AnotherRoom's UI under CR names** with the kernel inside. The JSX shell replaces those doors in P4. | Every build is importable and complete; nothing waits on the shell to be usable. |
 | D-21 | **Editor portraits are painted by the bridge** (was O-10). | The mechanism exists live today in CE's STORYIMG path: the engine creates a **node widget** holding a 1px transparent **sentinel text** (`ce-storyimg:<id>`); the bridge finds it with a TreeWalker, re-scans on a debounced MutationObserver, climbs a bounded number of ancestors to the widget's own box, and paints there. CR's avatar uses the same channel with the older CharChat sentinel `ce-chatava:` — the bridge still parses `id\|emotion` and still has `_ccavFindSentinels`, `_ccavContainerFor` and `_ccavSettings`; only `_ccavPaintOne` is gone and is rebuilt on `_ceStoryImgRender`'s pattern. No image bytes cross into the worker. §6.8. |
 | D-22 | **Display options: account default, per-Contact override** (was O-11). | Stored on the Contact card as `display?`; resolved by one function (§6.8). |
+| D-117 | **Home's rooms take any shape, positions are fractions, and the camera follows the paired Contact.** A room's Home picture keeps its own ratio (the bridge's `--ce-img-ar`); anchors are x of width and y of height, a figure's size a fraction of the room's width, placed by tap-tap, mouse drag over a grid, or X/Y/Scale sliders. Home shows the paired Contact's room; the author can look at another room or drop in, which pins the chat's Location set to that room until **Follow**. **Design only** (§6.12, O-19). | Author's call, answering 0.80's question. Fractions of each axis make the square requirement unnecessary: nothing is measured, the box simply carries the picture's ratio. The camera rule keeps the chat's Location honest: by default it is where the Contact is, and it becomes where the User is only when the author drops in. |
 | D-116 | **Plan-only changes go straight to `main`;** engine and test changes still go through a branch and a PR. The plan lives only in the repo; the project copy under `claude/` is a convenience snapshot. | Author's call. Closes D-105's worry about the plan being out of step between accounts: whoever works on the plan pushes it to the one place. |
 | D-115 | **Illustrate, streamlined.** Compose has three sections: Scene, Who is in it, Generate. Who is in it lists each picked person's sets that have more than one version, so this picture can wear another outfit (or any set's version) without changing the chat's (`crIllus.picks`, in memory; picking the chat's own version clears it). The separate Location and What gets sent sections and the chunk lines under Generate are folded into one **What gets sent** toggle beside Generate, closed by default: the location line, the whole prompt in send order (start chunks, scene, after-scene chunks, location and card base, end chunks), each caption with its negative, and the full negative. **Built in engine 1.0.9.** | Author: the menu had two blocks of prompt text and no way to swap an outfit for one picture. The prompt it shows is the one the bridge assembles, so what you read is what is sent. |
 | D-114 | **The Images tab's Outfits are gone; outfits are sets** (supersedes D-107's "image-only outfits stay as layers"). A set gains **Clothes** (`wear`), on by default for a new Contact or User set: a scene's `@Name wears:` line replaces a Clothes set's image prompt. Cards carrying old outfits are converted once at load (and on import) into an `Outfit` Clothes set: the outfits that were on lead (joined as `Worn` when several were, a bare `None` when none were), so every picture is unchanged; the versions carry no brain text, so context is unchanged too. **Built in engine 1.0.9.** | Author: the outfits field duplicated what sets now do, and sets add the per-story switch, pictures and Chat > Brains. Variant ids are fixed (`oWorn`, `oNone`, `o1`…) so a re-conversion picks the same ones. `cr-imgv5-smoke.js` pins the conversion; the review's scene tests now give their cards a Clothes set and pass unchanged. |
@@ -1158,27 +1159,37 @@ reads — the harness runs, and a fixture pins one schedule-chosen and one relat
 
 #### Step 2 — Home's room and its figures
 
-- **A room is a version of the Scenario's Location set** with its own **square** Home picture (slot `h-<variantId>`,
-  separate from the variant's Stage picture, which stays wide). Square means one size number places anything.
-- **Coordinates are fractions of the room's side** (0–1, x and y), so a figure lands in the same spot at any window
-  size; nothing is measured, which matters because the script cannot measure the page (no layout in the worker).
+- **A room is a version of the Scenario's Location set** with its own Home picture (slot `h-<variantId>`, separate
+  from the variant's Stage picture). **Any shape** (D-117): the room's box takes the picture's own ratio from the
+  bridge's `--ce-img-ar`, as the Stage backdrop already does, so a wide hall and a tall stairwell both work.
+- **Coordinates are fractions of the picture** — x of its width, y of its height (0–1) — and a figure's size is a
+  fraction of the room's width, all applied as CSS percentages inside that box. A figure lands on the same spot at
+  any window size and any picture shape; nothing is measured, which matters because the script cannot measure the
+  page (no layout in the worker). Replacing a room's picture keeps every anchor where it was in fractions, so a new
+  picture with a different layout may want them moved.
 - **Activities belong to a Contact** (a User too, later): *Sleeping*, *Cooking*, *Reading*… each one a picture slot
   (`a-<id>`), a room, an anchor point (x, y — the picture's **centre** sits there), a **scale** (the picture's width
   as a fraction of the room's), and an optional generation prompt. A schedule event links to an activity (step 1's
   link gains `activity`); the activity's room then also picks the Location set, so one link does both.
   With no event on, the Contact's **Idle** activity for the room they are in is used.
-- **Arrange mode** lays a grid over the room (a fixed 20×20, drawn only while arranging). Placing a figure: tap it,
-  then tap a cell — this works on a phone, where a finger drag cannot cross elements. With a mouse, press on the
-  figure and the cells it passes update it live (`onPointerDown` / `onPointerEnter` / `onPointerUp`, jsx-typings
-  L101–107; a touch keeps its pointer captured, hence tap-tap there). Scale is a slider beside it.
+- **Arrange mode** lays a 20×20 grid over the room (cells stretch with the picture's shape; drawn only while
+  arranging). Three ways to place, all writing the same fractions: **tap the figure, then a cell** (works on a phone,
+  where a finger drag cannot cross elements); **drag with a mouse** — press on the figure and the cells it passes
+  update it live (`onPointerDown` / `onPointerEnter` / `onPointerUp`, jsx-typings L101–107); and **X, Y and Scale
+  sliders** for fine placement (`<input type="range">` with `min`/`max`/`step`, jsx-typings L113; CR's first range
+  input, so its look is a live check).
 - **Painting** follows the Stage's rules (§6.8b): every picture is its own `data-ce-ar-host`, so the bridge reports
   each one's ratio and the figure keeps its shape; no bridge change is expected.
 - **Activity pictures**: uploads keep transparency (the bridge stores a PNG with alpha as is). A generated one has a
   background; NovelAI's background-removal tool would fix that — **unknown** whether the API offers it and at what
   cost (U-new, a bridge probe). Until then a plain or simple background is the honest default, and one press makes
   one picture (D-40).
-- **Who is shown**: the paired Contact and the group's members, each in the room their activity puts them in. Home
-  shows one room at a time with a strip of the rooms and who is in each.
+- **Who is shown**: the paired Contact and the group's members, each in the room their activity puts them in.
+- **The camera** (D-117) follows the paired Contact: Home shows the room they are in and moves when the schedule
+  moves them. A strip of the rooms, with who is in each, lets the author **look** at another room (view only; the
+  camera returns to the Contact on the next schedule move or on **Follow**) or **drop in**: the User goes there, the
+  chat's Location set is pinned to that room — so the chat's brains and pictures say where the conversation is — and
+  the camera stays with the User until **Follow** sends it back and unpins.
 
 #### Step 3 — needs and actions
 
@@ -1206,8 +1217,9 @@ reads — the harness runs, and a fixture pins one schedule-chosen and one relat
 | Activities, anchors, scale, schedule links, relationship rules | the Contact's `cr` bag | travel with the card |
 | Pins, needs, the away log, last-seen time | the story (`storyStorage`; pins in `historyStorage` as now) | a chat's own state, like the version in use |
 
-**Open**: whether the User has a place in the house — if so, the chat's Location could follow the room the User is in,
-and a Contact in another room is "elsewhere"; if not, the chat's Location follows the paired Contact. Real or story clock
+**Open**: what a drop-in means for who answers — in a group, whether members in the dropped-into room should be the
+ones offered to reply (D-85's member buttons), and whether the paired Contact, left in another room, is told the User
+is elsewhere. Real or story clock
 for Home (D-08; leaning: the chat's own clock, so one setting rules both). What a catch-up costs with a group. Whether
 the first open of a story may run one catch-up unasked (D-40 says no unattended generation; the replay is free, the
 narration is a press).
@@ -1376,6 +1388,8 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ---
 
 ## 10. Changelog
+
+- **0.81** — plan only: D-117 (Home rooms any shape, fractional positions with sliders, camera follows the paired Contact; look or drop in).
 
 - **0.80** — plan only: §6.12 Home mapped in four steps (sets chosen by schedule and relationship; square rooms with fractional anchors, activities, tap-tap and mouse placement; needs and actions; catch-up), with where each piece is kept. O-19 stays open.
 
