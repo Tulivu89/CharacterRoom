@@ -1,7 +1,7 @@
 // ============================================================================
 // cr-home-smoke.js — Home, step 2  [CR-HOME]
 //
-// Pins engine 1.0.11 (D-117, D-118, D-120): where each chat member is (schedule activity, schedule room link,
+// Pins engine 1.0.11 (D-117, D-118, D-120) and 1.0.12 (D-121): where each chat member is (schedule activity, schedule room link,
 // the chat's room), the User with the Contact unless dropped in, the speaker told only their own room and who
 // is there, nothing changed while Home is off, Arrange (tap, drag end saves), activity pictures, the event
 // sheet's Activity, and the sanitizer.
@@ -113,7 +113,7 @@ async function load(env) {
     const names = ['crBridge', 'charList', 'userList', 'scenarioList', 'chatSettings', 'crBrainView', 'crHomePlace',
         'crHomeRoomsSet', 'crHomeUserRoom', 'crHomeSetOn', 'crSetResolve', 'crPickVariant', 'crUnpinVariant', 'CrHomeSurface',
         'crHomeUi', 'crHomeAddActivity', 'crHomeMoveTo', 'crHomeEndDrag', 'crHomeFind', 'crHomeGenerateActivity',
-        'crEventActChoice', 'crSanitizeContactExtra', 'crGroupLoad', 'crActivitiesOf', 'crHomeOn', 'crScheduleActSet', 'crScheduleDelete'];
+        'crEventActChoice', 'crSanitizeContactExtra', 'crGroupLoad', 'crActivitiesOf', 'crHomeOn', 'crScheduleActSet', 'crScheduleDelete', 'crHomeTarget', 'crHomeAddLayer', 'crHomeFindLayer', 'crSanitizeScenarioExtra'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -225,6 +225,37 @@ const SPEAKER = 'crHomeUi.__speak = (c) => { crGroupBuildChar = c; };';
 
   const clean = X.crSanitizeContactExtra()({ activities: [{ id: 'a1', name: 'x', room: 'vKit', x: 5, y: -1, scale: 0, idle: 'yes' }, { id: 'bad id', room: 'vKit' }], schedActs: { e1: 'a1', e2: 'no good' } });
   ok('data: activities clamp to the room and drop bad ids; links keep good ones', clean.activities.length === 1 && clean.activities[0].x === 1 && clean.activities[0].y === 0 && clean.activities[0].scale === 0.03 && !clean.activities[0].idle && JSON.stringify(clean.schedActs) === '{"e1":"a1"}', clean);
+
+  // ---- 1.0.12: a target survives the save that rebuilds its card; layers; zoom
+  X.crHomeUi().sel = 'c-kat|aCook';
+  let t1 = X.crHomeTarget()('c-kat|aCook');
+  t1.pos.x = 0.11;
+  await t1.save();
+  let t2 = X.crHomeTarget()('c-kat|aCook');
+  ok('slider: after a save rebuilds the card, the target is found afresh', t2 && t2.pos !== t1.pos && t2.pos.x === 0.11);
+  t2.pos.x = 0.22;
+  await t2.save();
+  ok('slider: and the next change is the one saved, not lost on a stale copy', (await L.storage.get('characterListKey')).find((c) => c.id === 'c-kat').cr.activities[0].x === 0.22);
+  const p2 = X.scenarioList()[0];
+  await X.crHomeAddLayer()(p2, 'vKit');
+  const lk = X.crHomeUi().sel;
+  const fl = X.crHomeFindLayer()(lk);
+  ok('layers: Add makes a whole-room layer over the people and selects it', lk.indexOf('L:vKit|') === 0 && fl && fl.layer.fill === true && fl.layer.above === true && fl.layer.opacity === 1);
+  const lt = X.crHomeTarget()(lk);
+  lt.pos.opacity = 0.4;
+  lt.pos.blend = 'screen';
+  await lt.save();
+  const storedRooms = (await L.storage.get('scenarioListKey'))[0].cr.sets[0];
+  ok('layers: stored on the room version, opacity and blend kept', storedRooms.variants[0].layers[0].opacity === 0.4 && storedRooms.variants[0].layers[0].blend === 'screen', storedRooms.variants[0]);
+  X.crHomeUi().look = 'vKit';
+  txt = strings(X.CrHomeSurface()({ mobile: true }));
+  ok('layers: Arrange lists the room\'s layers and the selected one\'s controls', txt.indexOf('Layers in Kitchen') >= 0 && txt.indexOf('Over the people') >= 0 && txt.indexOf('Opacity') >= 0 && txt.indexOf('soft-light') >= 0, txt.slice(0, 900));
+  const bad = X.crSanitizeScenarioExtra()({ sets: [{ id: 'sR', name: 'R', variants: [{ id: 'v1', name: 'a', content: '', layers: [{ id: 'l1', opacity: 7, blend: 'difference', above: false, fill: false, scale: 9 }, { id: 'no good' }] }] }] });
+  const bl = bad.sets[0].variants[0].layers;
+  ok('layers: the sanitizer clamps and drops unknown blends and bad ids', bl.length === 1 && bl[0].opacity === 1 && bl[0].blend === 'normal' && bl[0].above === false && bl[0].fill === false && bl[0].scale === 1, bl);
+  X.crHomeUi().zoom = 2;
+  txt = strings(X.CrHomeSurface()({ mobile: true }));
+  ok('zoom: the readout and the look-around hint', txt.indexOf('2×') >= 0 && txt.indexOf('Scroll or swipe') >= 0);
 
   console.log('\n' + pass + ' passing, ' + fail + ' failing');
   if (fail) process.exit(1);

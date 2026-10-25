@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.11
+version: 1.0.12
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.11. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.12. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -60,8 +60,8 @@ SECTIONS (search "SECTION <NAME>")
   BRIDGE      bridge transport and handshake
   CR-GALLERY  stored images
   CR-STAGE    visual-novel view of the chat
-  CR-HOME     Home: the Scenario's rooms, the chat's people placed by activity, Arrange (tap, drag, sliders),
-              look / drop in / follow; with Home on, a speaker is told only their room (crHomeSpeakerRoom, in
+  CR-HOME     Home: the Scenario's rooms, the chat's people placed by activity, room layers (over or under the
+              people, blend, opacity), zoom, Arrange (tap, drag, sliders), look / drop in / follow; with Home on, a speaker is told only their room (crHomeSpeakerRoom, in
               crBrainView); place logic and the cr.home switch sit in CR-SETS
   MACRO-UI    macro list
   SCENARIO / USER / CONTACT   card templates, save, export; smart import (every Import button)
@@ -4916,6 +4916,20 @@ interface CrSetVariant {
   prompt?: string;
   uc?: string;
   intimacy?: string[];   // relationship levels this version is for (INTIMACY_LIST)
+  layers?: CrRoomLayer[];   // a Home room's layers (picture slot l-<id> on the Scenario)
+}
+
+// [CR-HOME] A picture over or under a room's people: the whole room, or one spot like an activity.
+interface CrRoomLayer {
+  id: string;
+  name: string;
+  above: boolean;
+  fill: boolean;
+  x: number;
+  y: number;
+  scale: number;
+  opacity: number;
+  blend: string;
 }
 
 // [CR-HOME] Something a Contact does in a room: its picture (slot a-<id>), where its centre sits as fractions
@@ -5559,6 +5573,8 @@ function crSanitizeSets(v: any) : CrBrainSet[] | undefined
       const lv: any[] = Array.isArray(r.intimacy) ? r.intimacy : [];
       const levels = (INTIMACY_LIST as readonly string[]).filter((x) => lv.indexOf(x) >= 0);
       if (levels.length){ one.intimacy = levels; }
+      const layers = crSanitizeLayers(r.layers);
+      if (layers){ one.layers = layers; }
       vars.push(one);
     }
     const set: CrBrainSet = { id: sid, name: crSanitizeText(raw.name, 80) || "", variants: vars };
@@ -5622,6 +5638,36 @@ function crSanitizeActivities(v: any) : CrActivity[] | undefined
     const p = crSanitizeText(r.prompt, 400);
     if (p){ a.prompt = p; }
     out.push(a);
+  }
+  return out.length ? out : undefined;
+}
+
+const CR_LAYER_MAX = 8;
+
+function crSanitizeLayers(v: any) : CrRoomLayer[] | undefined
+{
+  if (!Array.isArray(v)){
+    return undefined;
+  }
+  const out: CrRoomLayer[] = [];
+  const num = (x: any, lo: number, hi: number, d: number) => {
+    const n = Number(x);
+    return isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  };
+  const blends = ["normal", "screen", "lighten", "overlay", "soft-light", "multiply"];
+  for (let i = 0; i < v.length && out.length < CR_LAYER_MAX; i++){
+    const r = v[i];
+    const id = (r && typeof r === "object") ? crSanitizeText(r.id, 24) : undefined;
+    if (!id || !/^[A-Za-z0-9_-]+$/.test(id)){
+      continue;
+    }
+    out.push({
+      id: id, name: crSanitizeText(r.name, 80) || "",
+      above: r.above !== false, fill: r.fill !== false,
+      x: num(r.x, 0, 1, 0.5), y: num(r.y, 0, 1, 0.5), scale: num(r.scale, 0.03, 1, 0.5),
+      opacity: num(r.opacity, 0, 1, 1),
+      blend: blends.indexOf(r.blend) >= 0 ? r.blend : "normal"
+    });
   }
   return out.length ? out : undefined;
 }
@@ -21933,29 +21979,83 @@ function CrStageSurface(props: { mobile: boolean }) : any
 }
 
 // ============================================================================
-// SECTION CR-HOME — HOME: ROOMS, FIGURES, ACTIVITIES (§6.12 step 2, D-117, D-118)
+// SECTION CR-HOME — HOME: ROOMS, FIGURES, ACTIVITIES, LAYERS (§6.12 step 2, D-117, D-118, D-120, D-121)
 // ============================================================================
 // A room's box takes its Home picture's own ratio (the bridge's --ce-img-ar), and every position is a fraction
-// of that box, so nothing is measured. Each figure is its own ar-host so its picture keeps its shape (§6.8b).
+// of that box, so nothing is measured. Each figure and placed layer is its own ar-host so its picture keeps its
+// shape (§6.8b). Zoom widens an inner world inside a scrolling window: the browser does the panning.
 const CR_HOME_GRID = 10;
+const CR_HOME_ZOOMS = [1, 1.5, 2, 3, 4];
+const CR_LAYER_BLENDS = ["normal", "screen", "lighten", "overlay", "soft-light", "multiply"];
 
-type CrHomeUi = { look: string; arrange: boolean; sel: string; drag: string };
-let crHomeUi: CrHomeUi = { look: "", arrange: false, sel: "", drag: "" };
+type CrHomeUi = { look: string; arrange: boolean; sel: string; drag: string; zoom: number };
+let crHomeUi: CrHomeUi = { look: "", arrange: false, sel: "", drag: "", zoom: 1 };
+let crHomeSaveTimer = 0;
 
 function crHomeKey(charId: string, actId: string) : string
 {
   return charId + "|" + actId;
 }
 
+function crHomeLayerKey(roomId: string, layerId: string) : string
+{
+  return "L:" + roomId + "|" + layerId;
+}
+
 function crHomeFind(key: string) : { char: Character; act: CrActivity } | undefined
 {
   const at = key.indexOf("|");
-  if (at < 0){
+  if (at < 0 || key.indexOf("L:") === 0){
     return undefined;
   }
   const char = charList.find((c) => c.id === key.slice(0, at));
   const act = crActivitiesOf(char).find((a) => a.id === key.slice(at + 1));
   return (char && act) ? { char: char, act: act } : undefined;
+}
+
+function crHomeFindLayer(key: string) : { scenario: Scenario; room: CrSetVariant; layer: CrRoomLayer } | undefined
+{
+  if (key.indexOf("L:") !== 0){
+    return undefined;
+  }
+  const at = key.indexOf("|");
+  const scenario = crLiveScenario();
+  const rooms = crHomeRoomsSet(scenario);
+  const room = rooms ? rooms.variants.find((v) => v.id === key.slice(2, at)) : undefined;
+  const layer = room && room.layers ? room.layers.find((l) => l.id === key.slice(at + 1)) : undefined;
+  return (scenario && room && layer) ? { scenario: scenario, room: room, layer: layer } : undefined;
+}
+
+// Whatever is selected in Arrange — an activity or a layer — looked up fresh every time, because a save
+// rebuilds the card and an object held from an earlier render would be a stale copy.
+function crHomeTarget(key: string) : { pos: any; save: () => Promise<void> } | undefined
+{
+  const a = crHomeFind(key);
+  if (a){
+    return { pos: a.act, save: () => crHomeSaveActs(a.char) };
+  }
+  const l = crHomeFindLayer(key);
+  if (l){
+    return { pos: l.layer, save: () => crSetCardSets(l.scenario, "scenario", crCardSets(l.scenario)) };
+  }
+  return undefined;
+}
+
+// Sliders and drags change the live object at once and save once the hand stops.
+function crHomeSaveSoon(key: string) : void
+{
+  const t0 = crHomeSaveTimer;
+  crHomeSaveTimer = 0;
+  if (t0){
+    api.v1.timers.clearTimeout(t0).catch(() => {});
+  }
+  api.v1.timers.setTimeout(() => {
+    crHomeSaveTimer = 0;
+    const t = crHomeTarget(key);
+    if (t){
+      t.save().catch(() => {});
+    }
+  }, 500).then((id: number) => { crHomeSaveTimer = id; }).catch(() => {});
 }
 
 async function crHomeSaveActs(char: Character, list?: CrActivity[]) : Promise<void>
@@ -21990,14 +22090,46 @@ async function crHomeRemoveActivity(key: string) : Promise<void>
   await crHomeSaveActs(f.char, crActivitiesOf(f.char).filter((a) => a.id !== f.act.id));
 }
 
-function crHomeMoveTo(col: number, row: number) : void
+async function crHomeAddLayer(scenario: Scenario, roomId: string) : Promise<void>
 {
-  const f = crHomeFind(crHomeUi.sel);
-  if (!f){
+  const sets = crCardSets(scenario);
+  const rooms = crHomeRoomsSet(scenario);
+  const room = rooms ? rooms.variants.find((v) => v.id === roomId) : undefined;
+  if (!room){
     return;
   }
-  f.act.x = (col + 0.5) / CR_HOME_GRID;
-  f.act.y = (row + 0.5) / CR_HOME_GRID;
+  const list = (room.layers || []).slice();
+  if (list.length >= CR_LAYER_MAX){
+    try{ await api.v1.ui.toast("That is as many layers as one room keeps.", { type: "warning" }); }
+    catch (e){}
+    return;
+  }
+  const layer: CrRoomLayer = { id: crShortId("l"), name: "", above: true, fill: true, x: 0.5, y: 0.5, scale: 0.5, opacity: 1, blend: "normal" };
+  list.push(layer);
+  room.layers = list;
+  crHomeUi.sel = crHomeLayerKey(roomId, layer.id);
+  await crSetCardSets(scenario, "scenario", sets);
+}
+
+async function crHomeRemoveLayer(key: string) : Promise<void>
+{
+  const l = crHomeFindLayer(key);
+  if (!l){
+    return;
+  }
+  crHomeUi.sel = "";
+  l.room.layers = (l.room.layers || []).filter((x) => x.id !== l.layer.id);
+  await crSetCardSets(l.scenario, "scenario", crCardSets(l.scenario));
+}
+
+function crHomeMoveTo(col: number, row: number) : void
+{
+  const t = crHomeTarget(crHomeUi.sel);
+  if (!t){
+    return;
+  }
+  t.pos.x = (col + 0.5) / CR_HOME_GRID;
+  t.pos.y = (row + 0.5) / CR_HOME_GRID;
   crTouch();
 }
 
@@ -22006,10 +22138,10 @@ function crHomeEndDrag() : void
   if (!crHomeUi.drag){
     return;
   }
-  const f = crHomeFind(crHomeUi.drag);
+  const t = crHomeTarget(crHomeUi.drag);
   crHomeUi.drag = "";
-  if (f){
-    crHomeSaveActs(f.char).catch(() => {});
+  if (t){
+    t.save().catch(() => {});
   }
   crTouch();
 }
@@ -22088,9 +22220,9 @@ function CrHomeFigure(props: { k: string; charId: string; slot: string; name: st
     style: {
       position: "absolute", left: String(props.x * 100) + "%", top: String(props.y * 100) + "%",
       width: String(props.scale * 100) + "%", aspectRatio: "var(--ce-img-ar, 3 / 4)",
-      transform: "translate(-50%, -50%)", zIndex: props.selected ? "4" : "3",
+      transform: "translate(-50%, -50%)", zIndex: props.selected ? "5" : "4",
       outline: props.selected ? ("2px solid " + CR_ACCENT) : "none", borderRadius: CR_RADIUS_S,
-      cursor: props.arrange ? "grab" : "default", touchAction: "none",
+      cursor: props.arrange ? "grab" : "default", touchAction: props.arrange ? "none" : "auto",
       pointerEvents: (props.arrange && !dragging) ? "auto" : "none"
     }
   },
@@ -22103,15 +22235,51 @@ function CrHomeFigure(props: { k: string; charId: string; slot: string; name: st
   );
 }
 
-function CrHomeSlider(props: { label: string; value: number; min: number; max: number; onSlide: (n: number) => void; onDone: () => void }) : any
+function CrHomeLayer(props: { scenarioId: string; layer: CrRoomLayer; selected: boolean }) : any
 {
-  return h(CrField, { label: props.label + "  " + String(Math.round(props.value * 10) / 10) + "%" },
-    h("input", {
-      type: "range", min: props.min, max: props.max, step: 0.5, value: props.value,
-      onInput: (e: any) => { props.onSlide(Number(e && e.target ? e.target.value : props.value)); },
-      onChange: () => { props.onDone(); },
-      style: { width: "100%", accentColor: CR_ACCENT }
-    })
+  const l = props.layer;
+  const style: any = l.fill
+    ? { position: "absolute", inset: "0" }
+    : { position: "absolute", left: String(l.x * 100) + "%", top: String(l.y * 100) + "%",
+        width: String(l.scale * 100) + "%", aspectRatio: "var(--ce-img-ar, 1 / 1)", transform: "translate(-50%, -50%)" };
+  style.zIndex = l.above ? "6" : "2";
+  style.opacity = String(l.opacity);
+  style.mixBlendMode = l.blend || "normal";
+  style.pointerEvents = "none";
+  style.outline = props.selected ? ("2px dashed " + CR_ACCENT) : "none";
+  // Every layer is its own ar-host, a whole-room one too: otherwise its picture would publish its ratio onto
+  // the room's box and reshape the room.
+  return h("div", { class: "cr-home-layer", "data-ce-ar-host": "1", style: style },
+    crImgAnchor(props.scenarioId, "l-" + l.id, "fit=" + (l.fill ? "cover" : "contain") + ",collapse=1",
+      { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block" }));
+}
+
+// A slider writes through to whatever is selected, found fresh each time; − and + step by one point.
+function CrHomeSlider(props: { label: string; k: string; field: string; min: number; max: number; per: number }) : any
+{
+  const t = crHomeTarget(props.k);
+  const value = t ? Number(t.pos[props.field]) * props.per : props.min;
+  const put = (n: number) => {
+    const live = crHomeTarget(props.k);
+    if (!live || !isFinite(n)){
+      return;
+    }
+    live.pos[props.field] = Math.max(props.min, Math.min(props.max, n)) / props.per;
+    crTouch();
+    crHomeSaveSoon(props.k);
+  };
+  const read = (e: any) => Number(e && e.target && e.target.value !== undefined ? e.target.value : NaN);
+  return h(CrField, { label: props.label + "  " + String(Math.round(value * 10) / 10) },
+    h("div", { style: { display: "flex", gap: CR_S_2, alignItems: "center" } },
+      h(CrButton, { text: "−", icon: "", onClick: () => put(value - 1) }),
+      h("input", {
+        type: "range", min: props.min, max: props.max, step: 0.5, value: value,
+        onInput: (e: any) => put(read(e)),
+        onChange: (e: any) => put(read(e)),
+        style: { flex: "1 1 auto", minWidth: "0", accentColor: CR_ACCENT }
+      }),
+      h(CrButton, { text: "+", icon: "", onClick: () => put(value + 1) })
+    )
   );
 }
 
@@ -22142,6 +22310,10 @@ function CrHomeSurface(props: { mobile: boolean }) : any
   const roomOf = (id: string) => rooms.variants.find((v) => v.id === id);
   const roomName = (id: string) => { const v = roomOf(id); return (v && v.name) ? v.name : "a room"; };
   const arrange = crHomeUi.arrange;
+  const viewRoom = roomOf(view);
+  const layers: CrRoomLayer[] = (viewRoom && viewRoom.layers) ? viewRoom.layers : [];
+  const zoom = CR_HOME_ZOOMS.indexOf(crHomeUi.zoom) >= 0 ? crHomeUi.zoom : 1;
+  const zoomAt = CR_HOME_ZOOMS.indexOf(zoom);
 
   type Fig = { k: string; charId: string; slot: string; name: string; x: number; y: number; scale: number };
   const figs: Fig[] = [];
@@ -22161,7 +22333,8 @@ function CrHomeSurface(props: { mobile: boolean }) : any
         : { k: c.id + "|", charId: c.id, slot: CR_SLOT_AVATAR, name: c.name, x: (i + 0.5) / here.length * 0.8 + 0.1, y: 0.78, scale: 0.16 });
     });
   }
-  const sel = arrange ? crHomeFind(crHomeUi.sel) : undefined;
+  const selAct = arrange ? crHomeFind(crHomeUi.sel) : undefined;
+  const selLayer = arrange ? crHomeFindLayer(crHomeUi.sel) : undefined;
 
   const cells: any[] = [];
   if (arrange){
@@ -22169,39 +22342,50 @@ function CrHomeSurface(props: { mobile: boolean }) : any
       for (let c = 0; c < CR_HOME_GRID; c++){
         cells.push(h("div", {
           key: "g" + r + "_" + c,
-          onClick: () => { if (crHomeUi.sel){ crHomeMoveTo(c, r); const f = crHomeFind(crHomeUi.sel); if (f){ crHomeSaveActs(f.char).catch(() => {}); } } },
+          onClick: () => {
+            if (crHomeUi.sel){
+              crHomeMoveTo(c, r);
+              const t = crHomeTarget(crHomeUi.sel);
+              if (t){ t.save().catch(() => {}); }
+            }
+          },
           onPointerEnter: () => { if (crHomeUi.drag){ crHomeMoveTo(c, r); } },
           style: {
             position: "absolute", left: String(c * 100 / CR_HOME_GRID) + "%", top: String(r * 100 / CR_HOME_GRID) + "%",
             width: String(100 / CR_HOME_GRID) + "%", height: String(100 / CR_HOME_GRID) + "%",
-            boxSizing: "border-box", border: "1px dashed rgba(255,255,255,0.12)", zIndex: "2"
+            boxSizing: "border-box", border: "1px dashed rgba(255,255,255,0.12)", zIndex: "3"
           }
         }));
       }
     }
   }
 
-  const box = h("div", {
-    class: "cr-home-room",
-    "data-ce-ar-host": "1",
+  const world = h("div", {
+    class: "cr-home-world",
     onPointerUp: () => crHomeEndDrag(),
     onPointerLeave: () => crHomeEndDrag(),
-    style: {
-      position: "relative", width: "100%", maxWidth: "760px", aspectRatio: "var(--ce-img-ar, 1 / 1)",
-      background: CR_SUNK, border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
-      overflow: "hidden", touchAction: arrange ? "none" : "auto"
-    }
+    style: { position: "relative", width: String(zoom * 100) + "%", aspectRatio: "var(--ce-img-ar, 1 / 1)" }
   },
     h("div", { style: { position: "absolute", inset: "0", display: "grid", placeItems: "center", color: CR_DIM, fontSize: CR_T_SM, padding: CR_S_3, textAlign: "center" } },
       "No Home picture for " + roomName(view) + " yet — add one on the Scenario's Brains tab."),
     crImgAnchor(scenario.id, "h-" + view, "fit=cover,collapse=1",
       { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block", zIndex: "1" }),
+    layers.map((l) => h(CrHomeLayer, { key: l.id, scenarioId: scenario.id, layer: l, selected: arrange && crHomeUi.sel === crHomeLayerKey(view, l.id) })),
     cells,
     figs.map((f) => h(CrHomeFigure, {
       key: f.k, k: f.k, charId: f.charId, slot: f.slot, name: f.name, x: f.x, y: f.y, scale: f.scale,
       arrange: arrange, selected: arrange && crHomeUi.sel === f.k
     }))
   );
+  const box = h("div", {
+    class: "cr-home-room",
+    "data-ce-ar-host": "1",
+    style: {
+      position: "relative", width: "100%", aspectRatio: "var(--ce-img-ar, 1 / 1)", maxHeight: "78vh",
+      background: CR_SUNK, border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
+      overflow: zoom > 1 ? "auto" : "hidden"
+    }
+  }, world);
 
   const who = (id: string) => cast.filter((c) => places[c.id].room === id).map((c) => c.name).concat(userRoom === id ? ["you"] : []);
   const strip = h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
@@ -22219,30 +22403,60 @@ function CrHomeSurface(props: { mobile: boolean }) : any
     + (view !== contactRoom ? "  " + (contact.name || "The Contact") + " is in " + roomName(contactRoom) + "." : "")
     + (view !== userRoom ? "  You are in " + roomName(userRoom) + "." : "");
 
-  const panel = sel ? h(CrSection, {
-    title: (sel.char.name || "Unnamed") + "  ·  " + (sel.act.name || "Activity"),
-    note: "Tap a square to move it there, drag it with a mouse, or slide. Its picture's centre sits on the point."
+  const save = (k: string) => { const t = crHomeTarget(k); if (t){ t.save().catch(() => {}); } };
+  const k = crHomeUi.sel;
+  const placeSliders = [
+    h(CrHomeSlider, { key: "x", label: "Across", k: k, field: "x", min: 0, max: 100, per: 100 }),
+    h(CrHomeSlider, { key: "y", label: "Down", k: k, field: "y", min: 0, max: 100, per: 100 }),
+    h(CrHomeSlider, { key: "s", label: "Size", k: k, field: "scale", min: 3, max: 100, per: 100 })
+  ];
+  const panel = selAct ? h(CrSection, {
+    title: (selAct.char.name || "Unnamed") + "  ·  " + (selAct.act.name || "Activity"),
+    note: "Tap a square to move it there, drag it with a mouse, or slide. Its picture's centre sits on the point. "
+      + "An uploaded animated WebP, GIF or PNG keeps moving; a transparent one shows the room through."
   }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
     h(CrField, { label: "Activity" },
-      h(CrTextInput, { value: sel.act.name, placeholder: "Sleeping", onSet: (v: string) => { sel.act.name = v.slice(0, 80); crHomeSaveActs(sel.char).catch(() => {}); } })),
+      h(CrTextInput, { value: selAct.act.name, placeholder: "Sleeping", onSet: (v: string) => { const f = crHomeFind(k); if (f){ f.act.name = v.slice(0, 80); save(k); } } })),
     h(CrField, { label: "Picture prompt", hint: "For Generate: what they are doing, e.g. sleeping, lying in bed, from above." },
-      h(CrTextInput, { value: sel.act.prompt || "", placeholder: "reading, sitting on sofa, from above", onSet: (v: string) => { sel.act.prompt = v.slice(0, 400) || undefined; crHomeSaveActs(sel.char).catch(() => {}); } })),
-    h(CrHomeSlider, { label: "Across", value: sel.act.x * 100, min: 0, max: 100,
-      onSlide: (n: number) => { sel.act.x = n / 100; crTouch(); }, onDone: () => { crHomeSaveActs(sel.char).catch(() => {}); } }),
-    h(CrHomeSlider, { label: "Down", value: sel.act.y * 100, min: 0, max: 100,
-      onSlide: (n: number) => { sel.act.y = n / 100; crTouch(); }, onDone: () => { crHomeSaveActs(sel.char).catch(() => {}); } }),
-    h(CrHomeSlider, { label: "Size", value: sel.act.scale * 100, min: 3, max: 100,
-      onSlide: (n: number) => { sel.act.scale = n / 100; crTouch(); }, onDone: () => { crHomeSaveActs(sel.char).catch(() => {}); } }),
+      h(CrTextInput, { value: selAct.act.prompt || "", placeholder: "reading, sitting on sofa, from above", onSet: (v: string) => { const f = crHomeFind(k); if (f){ f.act.prompt = v.slice(0, 400) || undefined; save(k); } } })),
+    placeSliders,
     h(CrChoice, {
       label: "Idle here", hint: "On: where they are in this room when no schedule event names an activity.",
-      options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }], active: sel.act.idle ? "on" : "off",
-      onPick: (id: string) => { sel.act.idle = id === "on" ? true : undefined; crHomeSaveActs(sel.char).catch(() => {}); }
+      options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }], active: selAct.act.idle ? "on" : "off",
+      onPick: (id: string) => { const f = crHomeFind(k); if (f){ f.act.idle = id === "on" ? true : undefined; save(k); } }
     }),
     h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
-      h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(sel.char.id, "a-" + sel.act.id).catch(() => {}); } }),
-      h(CrButton, { text: "Generate picture", icon: "", onClick: () => { crHomeGenerateActivity(sel.char, sel.act).catch(() => {}); } }),
-      h(CrButton, { text: "Remove", icon: "", onClick: () => { crHomeRemoveActivity(crHomeUi.sel).catch(() => {}); } }))
-  )) : null;
+      h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(selAct.char.id, "a-" + selAct.act.id).catch(() => {}); } }),
+      h(CrButton, { text: "Generate picture", icon: "", onClick: () => { crHomeGenerateActivity(selAct.char, selAct.act).catch(() => {}); } }),
+      h(CrButton, { text: "Remove", icon: "", onClick: () => { crHomeRemoveActivity(k).catch(() => {}); } }))
+  )) : (selLayer ? h(CrSection, {
+    title: roomName(view) + "  ·  " + (selLayer.layer.name || "Layer"),
+    note: "A picture over or under the room's people — light, weather, a window's glow. Upload a transparent or "
+      + "animated WebP, GIF or PNG; Blend decides how it mixes with what is beneath it."
+  }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+    h(CrField, { label: "Layer" },
+      h(CrTextInput, { value: selLayer.layer.name, placeholder: "Candlelight", onSet: (v: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.name = v.slice(0, 80); save(k); } } })),
+    h(CrChoice, {
+      label: "Sits", options: [{ id: "above", label: "Over the people" }, { id: "below", label: "Under the people" }],
+      active: selLayer.layer.above ? "above" : "below",
+      onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.above = id === "above"; save(k); } }
+    }),
+    h(CrChoice, {
+      label: "Covers", options: [{ id: "fill", label: "The whole room" }, { id: "placed", label: "One spot" }],
+      active: selLayer.layer.fill ? "fill" : "placed",
+      onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.fill = id === "fill"; save(k); } }
+    }),
+    h(CrChoice, {
+      label: "Blend", options: CR_LAYER_BLENDS.map((b) => ({ id: b, label: b })),
+      active: selLayer.layer.blend || "normal",
+      onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.blend = id; save(k); } }
+    }),
+    h(CrHomeSlider, { label: "Opacity", k: k, field: "opacity", min: 0, max: 100, per: 100 }),
+    selLayer.layer.fill ? null : placeSliders,
+    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+      h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(selLayer.scenario.id, "l-" + selLayer.layer.id).catch(() => {}); } }),
+      h(CrButton, { text: "Remove", icon: "", onClick: () => { crHomeRemoveLayer(k).catch(() => {}); } }))
+  )) : null);
 
   return h("div", { class: "cr-home", style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
     h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
@@ -22253,16 +22467,27 @@ function CrHomeSurface(props: { mobile: boolean }) : any
       view !== userRoom ? h(CrButton, { text: "Drop in", icon: "",
         onClick: () => { crHomeUi.look = ""; crPickVariant(rooms.id, view).catch(() => {}); } }) : null,
       (crHomeUi.look || pinned) ? h(CrButton, { text: "Follow " + (contact.name || "the Contact"), icon: "",
-        onClick: () => { crHomeUi.look = ""; if (pinned){ crUnpinVariant(rooms.id).catch(() => {}); } else { crTouch(); } } }) : null
+        onClick: () => { crHomeUi.look = ""; if (pinned){ crUnpinVariant(rooms.id).catch(() => {}); } else { crTouch(); } } }) : null,
+      h("div", { style: { flex: "1 1 auto" } }),
+      h(CrButton, { text: "−", icon: "", disabled: zoomAt <= 0, onClick: () => { crHomeUi.zoom = CR_HOME_ZOOMS[Math.max(0, zoomAt - 1)]; crTouch(); } }),
+      h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, minWidth: "34px", textAlign: "center" } }, String(zoom) + "×"),
+      h(CrButton, { text: "+", icon: "", disabled: zoomAt >= CR_HOME_ZOOMS.length - 1, onClick: () => { crHomeUi.zoom = CR_HOME_ZOOMS[Math.min(CR_HOME_ZOOMS.length - 1, zoomAt + 1)]; crTouch(); } })
     ),
     crHomeOn ? null : h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
       "While Home is off the chat works as before. On, each speaker is told only the room they are in and who is there with them."),
     strip,
-    h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } }, status),
+    h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
+      status + (zoom > 1 ? "  Scroll or swipe the picture to look around." : "")),
     box,
     arrange ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
       h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "Add an activity in " + roomName(view) + " for"),
       cast.map((c) => h(CrButton, { key: c.id, text: c.name || "Unnamed", icon: "", onClick: () => { crHomeAddActivity(c, view).catch(() => {}); } }))
+    ) : null,
+    arrange ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
+      h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "Layers in " + roomName(view)),
+      layers.map((l) => h(CrButton, { key: l.id, text: l.name || "Layer", icon: "", primary: crHomeUi.sel === crHomeLayerKey(view, l.id),
+        onClick: () => { crHomeUi.sel = crHomeLayerKey(view, l.id); crTouch(); } })),
+      h(CrButton, { text: "Add a layer", icon: "", onClick: () => { crHomeAddLayer(scenario, view).catch(() => {}); } })
     ) : null,
     panel
   );
