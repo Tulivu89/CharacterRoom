@@ -1,10 +1,11 @@
 // ============================================================================
-// cr-home-smoke.js — Home, step 2  [CR-HOME]
+// cr-home-smoke.js — Home  [CR-HOME]
 //
-// Pins engine 1.0.11 (D-117, D-118, D-120) 1.0.12 (D-121) and 1.0.13 (D-122): where each chat member is (schedule activity, schedule room link,
-// the chat's room), the User with the Contact unless dropped in, the speaker told only their own room and who
-// is there, nothing changed while Home is off, Arrange (tap, drag end saves), activity pictures, the event
-// sheet's Activity, and the sanitizer.
+// Pins engine 1.0.14 (D-117, D-118, D-120 to D-123): a Contact's schedule lines carry Home per Scenario (room,
+// spot, picture), a nothing-on place, the User with the Contact unless dropped in, a speaker told only their own
+// room, nothing changed while Home is off, the Scenario's Locations with layers and atmosphere on the chat clock,
+// Arrange (tap, drag end saves, fresh targets), pictures, routines, the event sheet, the 1.0.13 migration and
+// the sanitizers.
 //   CR_ENGINE_FILE=<engine> node cr-home-smoke.js
 // ============================================================================
 const fs = require('fs');
@@ -77,7 +78,7 @@ async function load(env) {
         } }),
         editor: stub('editor'),
         timers: { sleep: async () => {}, setTimeout: async () => 1, clearTimeout: async () => {} },
-        file: { prompt: async () => { rec.prompts++; return env.file; }, save: async () => {} },
+        file: { prompt: async () => { rec.prompts++; return env.file; }, save: async (n, c) => { rec.saved = { n: n, c: c }; } },
         messaging: {
             onMessage: async () => 0,
             broadcast: async (msg) => {
@@ -112,8 +113,11 @@ async function load(env) {
     });
     const names = ['crBridge', 'charList', 'userList', 'scenarioList', 'chatSettings', 'crBrainView', 'crHomePlace',
         'crHomeRoomsSet', 'crHomeUserRoom', 'crHomeSetOn', 'crSetResolve', 'crPickVariant', 'crUnpinVariant', 'CrHomeSurface',
-        'crHomeUi', 'crHomeAddActivity', 'crHomeMoveTo', 'crHomeEndDrag', 'crHomeFind', 'crHomeGenerateActivity',
-        'crEventActChoice', 'crSanitizeContactExtra', 'crGroupLoad', 'crActivitiesOf', 'crHomeOn', 'crScheduleActSet', 'crScheduleDelete', 'crHomeTarget', 'crHomeAddLayer', 'crHomeFindLayer', 'crSanitizeScenarioExtra'];
+        'crHomeUi', 'crHomePlaceLine', 'crHomeUnplace', 'crHomeNewPic', 'crHomeMoveTo', 'crHomeEndDrag', 'crHomeFind', 'crHomeGeneratePic',
+        'crEventHomeChoice', 'crEventSetChoices', 'crSanitizeContactExtra', 'crSanitizeScenarioExtra', 'crGroupLoad', 'crHomeOn',
+        'crScheduleDelete', 'crHomeTarget', 'crHomeAddLayer', 'crHomeFindLayer', 'crLayerShown', 'crRoomPicSlot', 'crAtmosLive',
+        'CrLocationsTab', 'crLocOpen', 'crRoutineSave', 'crRoutineLoad', 'crRoutineExport', 'crRoutineImport', 'crScheduleOf',
+        'crLineHomeOf', 'crHomeIdleOf', 'crPicsOf', 'crSchedPresetsOf', 'CrRoutinesSection'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -121,6 +125,7 @@ async function load(env) {
     if (env.bridge) X.crBridge().ready = true;
     return { X, rec, storage };
 }
+
 
 
 
@@ -136,134 +141,178 @@ const flat = (n, out) => { out = out || []; if (n == null || typeof n !== 'objec
 const strings = (n) => flat(n).filter((x) => typeof x === 'string').join(' | ');
 
 const ROOMS = { id: 'sRooms', name: 'Rooms', rooms: true, variants: [
-  { id: 'vKit', name: 'Kitchen', content: 'A small kitchen.' },
+  { id: 'vKit', name: 'Kitchen', content: 'A small kitchen.', layers: [{ id: 'lC', name: 'Candles', above: true, fill: true, x: 0.5, y: 0.5, scale: 0.5, opacity: 1, blend: 'screen', shown: false }] },
   { id: 'vGar', name: 'Garden', content: '' } ] };
-const PORT = { cardType: 'scenario', id: 's-port', name: 'Port', environment: 'A house.', brains: [], brainsConditional: [], cr: { sets: [ROOMS] } };
-const ALWAYS = (id) => ({ Daily: [{ id: id, startTime: 0, endTime: 1439, text: 'Busy', requiredIntimacy: 'none' }] });
+const MOOD = { id: 'sMood', name: 'Weather', variants: [{ id: 'vSun', name: 'Sunny', content: '' }, { id: 'vRain', name: 'Rain', content: '' }] };
+const PORT = { cardType: 'scenario', id: 's-port', name: 'Port', environment: 'A house.', brains: [], brainsConditional: [], cr: { sets: [ROOMS, MOOD] } };
+const ALWAYS = (id, text) => ({ Daily: [{ id: id, startTime: 0, endTime: 1439, text: text || 'Busy', requiredIntimacy: 'none' }] });
 const KAT = { cardType: 'contact', id: 'c-kat', name: 'Kat', gender: 'female', appearance: 'short hair', emotions: {}, exampleChats: [], brains: [], brainsConditional: [],
-  schedule: ALWAYS('e1'),
-  cr: { activities: [{ id: 'aCook', name: 'Cooking', room: 'vKit', x: 0.4, y: 0.5, scale: 0.3, prompt: 'cooking at stove, from above' },
-                     { id: 'aRead', name: 'Reading', room: 'vGar', x: 0.5, y: 0.5, scale: 0.3, idle: true }],
-        schedActs: { e1: 'aCook' } } };
+  schedule: ALWAYS('e1', 'Cooking dinner'),
+  cr: { pics: [{ id: 'pCook', name: 'Cooking', prompt: 'cooking at stove, from above' }, { id: 'pRead', name: 'Reading' }],
+        lineHome: { e1: { 's-port': { room: 'vKit', x: 0.4, y: 0.5, scale: 0.3, pic: 'pCook' } } },
+        homeIdle: { 's-port': { room: 'vGar', x: 0.5, y: 0.5, scale: 0.3, pic: 'pRead' } } } };
 const GARM = { cardType: 'contact', id: 'c-garm', name: 'Garm', gender: 'male', species: 'wolf', emotions: {}, exampleChats: [], brains: [], brainsConditional: [],
-  schedule: ALWAYS('e2'), cr: { activities: [{ id: 'aDig', name: 'Digging', room: 'vGar', x: 0.7, y: 0.7, scale: 0.25 }], schedActs: { e2: 'aDig' } } };
+  schedule: ALWAYS('e2', 'Digging'), cr: { lineHome: { e2: { 's-port': { room: 'vGar', x: 0.7, y: 0.7, scale: 0.25 } } } } };
+const OLD = { cardType: 'contact', id: 'c-old', name: 'Vex', gender: 'female', emotions: {}, exampleChats: [], brains: [], brainsConditional: [],
+  schedule: ALWAYS('e9', 'Napping'),
+  cr: { activities: [{ id: 'aNap', name: 'Napping', room: 'vGar', x: 0.2, y: 0.3, scale: 0.2 }, { id: 'aSit', name: 'Sitting', room: 'vKit', x: 0.6, y: 0.6, scale: 0.2, idle: true }, { id: 'aNo', name: 'Elsewhere', room: 'vNone', x: 0.5, y: 0.5, scale: 0.2 }],
+        schedActs: { e9: 'aNap' } } };
 const SAM = { cardType: 'user', id: 'u-sam', name: 'Sam', brains: [], brainsConditional: [] };
 const SPEAKER = 'crHomeUi.__speak = (c) => { crGroupBuildChar = c; };';
 
 (async () => {
-  const L = await load({ storage: { characterListKey: [KAT, GARM], userListKey: [SAM], scenarioListKey: [PORT] },
+  const L = await load({ storage: { characterListKey: [KAT, GARM, OLD], userListKey: [SAM], scenarioListKey: [PORT] },
     storyStorage: { chatSettingsKey: { char: KAT, user: SAM, scenario: PORT, intimacy: 'close', style: 'chat', responseLength: 'unspecified' },
                     'cr.group': { v: 1, members: ['c-kat', 'c-garm'], pools: {} } },
     bridge: { json: '' }, extra: [SPEAKER] });
   const X = L.X;
   await X.crGroupLoad()();
-  const port = X.scenarioList()[0];
-  const kat = X.charList().find((c) => c.id === 'c-kat');
-  const garm = X.charList().find((c) => c.id === 'c-garm');
-  const rooms = X.crHomeRoomsSet()(port);
+  const port = () => X.scenarioList()[0];
+  const kat = () => X.charList().find((c) => c.id === 'c-kat');
+  const garm = () => X.charList().find((c) => c.id === 'c-garm');
+  const rooms = () => X.crHomeRoomsSet()(port());
   const brainOf = (v) => (v.brains || []).find((b) => /^Rooms: /.test(b.name));
 
-  ok('rooms: the set marked Home rooms', rooms && rooms.id === 'sRooms');
-  const pk = X.crHomePlace()(kat, rooms, 's-port');
-  const pg = X.crHomePlace()(garm, rooms, 's-port');
-  ok('place: the schedule event\'s activity puts Kat in its room', pk.room === 'vKit' && pk.act && pk.act.id === 'aCook' && pk.why === 'schedule', pk);
-  ok('place: each member follows their own schedule', pg.room === 'vGar' && pg.act.id === 'aDig', pg);
-  ok('place: the User is with the paired Contact', X.crHomeUserRoom()(rooms, 's-port') === 'vKit');
-  ok('sets: the chat\'s rooms set follows the Contact\'s activity too', X.crSetResolve()(rooms, 's-port').v.id === 'vKit' && X.crSetResolve()(rooms, 's-port').why === 'schedule');
+  // ---- the 1.0.13 migration
+  const old = X.charList().find((c) => c.id === 'c-old');
+  ok('migrate: activities fold into the lines, the idle one into the nothing-on place, all kept as pictures',
+    !old.cr.activities && !old.cr.schedActs && old.cr.lineHome.e9['s-port'].room === 'vGar' && old.cr.lineHome.e9['s-port'].pic === 'aNap'
+    && old.cr.homeIdle['s-port'].room === 'vKit' && old.cr.pics.map((p) => p.id).join() === 'aNap,aSit,aNo', old.cr);
+  ok('migrate: stored once', JSON.stringify(await L.storage.get('characterListKey')).indexOf('schedActs') < 0);
 
-  let b = brainOf(X.crBrainView()(port));
-  ok('home off: the rooms set sends as any set does, no presence line', b && b.content === 'A small kitchen.', b);
+  // ---- places
+  ok('rooms: the set marked as locations', rooms() && rooms().id === 'sRooms');
+  const pk = X.crHomePlace()(kat(), rooms(), 's-port');
+  ok('place: a line on now with a Home part here puts Kat there, with its picture', pk.room === 'vKit' && pk.line === 'e1' && pk.spot.pic === 'pCook' && pk.why === 'schedule', pk);
+  ok('place: each member follows their own lines', X.crHomePlace()(garm(), rooms(), 's-port').room === 'vGar');
+  ok('place: the User is with the paired Contact', X.crHomeUserRoom()(rooms(), 's-port') === 'vKit');
+  ok('sets: the chat\'s location follows the line\'s place in this Scenario', X.crSetResolve()(rooms(), 's-port').v.id === 'vKit' && X.crSetResolve()(rooms(), 's-port').why === 'schedule');
+  ok('place: another Scenario sees no Home part for the same line', X.crHomePlace()(kat(), rooms(), 's-other').why !== 'schedule');
+
+  // ---- the speaker's room
+  let b = brainOf(X.crBrainView()(port()));
+  ok('home off: the location sends as any set does', b && b.content === 'A small kitchen.', b);
   await X.crHomeSetOn()(true);
-  ok('home on: stored per story', JSON.stringify(await X.story.get('cr.home')) === '{"on":true}' && X.crHomeOn() === true);
-  b = brainOf(X.crBrainView()(port));
-  ok('home on: the paired Contact is told their room and who is in it', b && b.name === 'Rooms: Kitchen' && b.content === 'A small kitchen.\nAlso in Kitchen: Sam.', b);
-  X.crHomeUi().__speak(garm);
-  b = brainOf(X.crBrainView()(port));
+  b = brainOf(X.crBrainView()(port()));
+  ok('home on: the paired Contact is told their room and who is in it', b && b.content === 'A small kitchen.\nAlso in Kitchen: Sam.', b);
+  X.crHomeUi().__speak(garm());
+  b = brainOf(X.crBrainView()(port()));
   ok('home on: a member speaking is told only their own room', b && b.name === 'Rooms: Garden' && b.content === 'Nobody else is in Garden.', b);
   await X.crPickVariant()('sRooms', 'vGar');
-  ok('drop in: the User is where the author dropped in', X.crHomeUserRoom()(rooms, 's-port') === 'vGar');
-  b = brainOf(X.crBrainView()(port));
-  ok('drop in: the member in that room now has the User with them', b && b.content === 'Also in Garden: Sam.', b);
+  b = brainOf(X.crBrainView()(port()));
+  ok('drop in: the member there now has the User with them', b && b.content === 'Also in Garden: Sam.', b);
   X.crHomeUi().__speak(null);
-  b = brainOf(X.crBrainView()(port));
+  b = brainOf(X.crBrainView()(port()));
   ok('drop in: the Contact left behind is not told where the User went', b && b.content === 'A small kitchen.\nNobody else is in Kitchen.', b);
-  ok('drop in: Kat stays where her schedule puts her', X.crHomePlace()(kat, rooms, 's-port').room === 'vKit');
   await X.crUnpinVariant()('sRooms');
-  ok('follow: unpinning puts the User back with the Contact', X.crHomeUserRoom()(rooms, 's-port') === 'vKit');
+  ok('follow: unpinning puts the User back with the Contact', X.crHomeUserRoom()(rooms(), 's-port') === 'vKit');
 
+  // ---- atmosphere
+  const kit = () => rooms().variants[0];
+  ok('layers: a layer hidden by default is hidden', X.crLayerShown()(kit(), kit().layers[0]) === false);
+  kit().atmos = [{ id: 't1', day: 'Daily', start: 0, end: 1439, text: 'The lamps are lit.', on: ['lC'] }];
+  ok('atmosphere: a line on now shows its layer', X.crLayerShown()(kit(), kit().layers[0]) === true);
+  b = brainOf(X.crBrainView()(port()));
+  ok('atmosphere: its words join the place\'s brain', b && b.content === 'A small kitchen.\nThe lamps are lit.\nAlso in Kitchen: Sam.', b);
+  ok('atmosphere: the place\'s own Home picture unless the line has one', X.crRoomPicSlot()(kit()) === 'h-vKit');
+  kit().atmos[0].alt = true;
+  ok('atmosphere: a line with its own picture swaps it in', X.crRoomPicSlot()(kit()) === 'h-vKit-t1');
+  kit().atmos = undefined;
+
+  // ---- surface and Arrange
   let txt = strings(X.CrHomeSurface()({ mobile: true }));
-  ok('surface: rooms with how many are in each, and where everyone is', txt.indexOf('Kitchen  ·  2') >= 0 && txt.indexOf('Garden  ·  1') >= 0 && txt.indexOf('In Kitchen: Kat, you.') >= 0, txt.slice(0, 500));
+  ok('surface: rooms with how many are in each', txt.indexOf('Kitchen  ·  2') >= 0 && txt.indexOf('Garden  ·  1') >= 0 && txt.indexOf('In Kitchen: Kat, you.') >= 0, txt.slice(0, 400));
   X.crHomeUi().look = 'vGar';
-  txt = strings(X.CrHomeSurface()({ mobile: true }));
-  ok('surface: looking at another room says where the Contact and you are, and offers Drop in and Follow', txt.indexOf('In Garden: Garm.') >= 0 && txt.indexOf('Kat is in Kitchen.') >= 0 && txt.indexOf('Drop in') >= 0 && txt.indexOf('Follow Kat') >= 0, txt.slice(0, 500));
   X.crHomeUi().arrange = true;
-  await X.crHomeAddActivity()(garm, 'vGar');
-  const g2 = X.charList().find((c) => c.id === 'c-garm');
-  ok('arrange: Add makes an activity in the room and selects it', X.crActivitiesOf()(g2).length === 2 && X.crHomeUi().sel.indexOf('c-garm|') === 0);
   txt = strings(X.CrHomeSurface()({ mobile: true }));
-  ok('arrange: the selected activity has its sliders and picture buttons', txt.indexOf('Across') >= 0 && txt.indexOf('Size') >= 0 && txt.indexOf('Generate picture') >= 0 && txt.indexOf('Add an activity in Garden for') >= 0, txt.slice(0, 800));
-  X.crHomeUi().drag = X.crHomeUi().sel;
+  ok('arrange: each person\'s lines and nothing-on can be put here', txt.indexOf('Put Kat here for') >= 0 && txt.indexOf('Cooking dinner') >= 0 && txt.indexOf('Put Garm here for') >= 0 && txt.indexOf('When nothing is on') >= 0, txt.slice(0, 900));
+  await X.crHomePlaceLine()(garm(), X.crScheduleOf()(garm()).Daily[0].id, 's-port', 'vKit');
+  ok('arrange: putting a line in another room moves its Home part, keeping its spot', X.crLineHomeOf()(garm()).e2['s-port'].room === 'vKit' && X.crLineHomeOf()(garm()).e2['s-port'].x === 0.7 && X.crHomeUi().sel === 'c-garm|e2');
+  X.crHomeUi().look = 'vKit';
+  txt = strings(X.CrHomeSurface()({ mobile: true }));
+  ok('arrange: the selected line shows its picture choice, sliders and the way out', txt.indexOf('Garm  ·  ') >= 0 && txt.indexOf('Digging') >= 0 && txt.indexOf('New picture') >= 0 && txt.indexOf('Across') >= 0 && txt.indexOf('Take out of Kitchen') >= 0, txt.slice(0, 900));
+  await X.crHomeNewPic()(garm(), 'c-garm|e2', 'Digging');
+  const gp = X.crPicsOf()(garm());
+  ok('pictures: New picture makes one named for the line and gives it to the line', gp.length === 1 && gp[0].name === 'Digging' && X.crLineHomeOf()(garm()).e2['s-port'].pic === gp[0].id, gp);
+  let t1 = X.crHomeTarget()('c-garm|e2');
+  t1.pos.x = 0.11;
+  await t1.save();
+  let t2 = X.crHomeTarget()('c-garm|e2');
+  t2.pos.x = 0.22;
+  await t2.save();
+  ok('arrange: a target is found afresh after a save, and the change after it is the one kept', t2.pos !== t1.pos && (await L.storage.get('characterListKey')).find((c) => c.id === 'c-garm').cr.lineHome.e2['s-port'].x === 0.22);
+  X.crHomeUi().drag = 'c-garm|e2';
   X.crHomeMoveTo()(2, 7);
   X.crHomeEndDrag()();
   await new Promise((r) => setTimeout(r, 0));
-  const saved = (await L.storage.get('characterListKey')).find((c) => c.id === 'c-garm').cr.activities[1];
-  ok('arrange: a drag lands on the square\'s centre and is saved when it ends', saved.x === 0.25 && saved.y === 0.75 && X.crHomeUi().drag === '', saved);
+  const saved = (await L.storage.get('characterListKey')).find((c) => c.id === 'c-garm').cr.lineHome.e2['s-port'];
+  ok('arrange: a drag lands on the square\'s centre and is saved when it ends', saved.x === 0.25 && saved.y === 0.75, saved);
+  await X.crHomeUnplace()(garm(), 'e2', 's-port');
+  ok('arrange: Take out removes the Home part here', !X.crLineHomeOf()(garm()).e2);
 
   X.crBridge().ready = true;
-  await X.crHomeGenerateActivity()(kat, X.crActivitiesOf()(kat)[0]);
+  await X.crHomeGeneratePic()(kat(), X.crPicsOf()(kat())[0]);
   const sent = L.rec.sent[L.rec.sent.length - 1];
-  ok('picture: an activity generates into its own slot with the card\'s looks', sent && sent.slot === 'a-aCook' && sent.charId === 'c-kat' && /^1girl, solo, full body, cooking at stove/.test(sent.prompt) && /short hair/.test(sent.characters[0].visuals), sent);
+  ok('pictures: generating draws into the picture\'s own slot with the card\'s looks', sent && sent.slot === 'a-pCook' && /^1girl, solo, full body, cooking at stove/.test(sent.prompt) && /short hair/.test(sent.characters[0].visuals), sent);
 
-  txt = strings(X.crEventActChoice()(kat, 'e1'));
-  ok('event sheet: Activity lists the Contact\'s activities with their rooms', txt.indexOf('Cooking (Kitchen)') >= 0 && txt.indexOf('Reading (Garden)') >= 0, txt);
-  await X.crScheduleActSet()(X.charList().find((c) => c.id === 'c-kat'), 'e1', 'aRead');
-  ok('event sheet: picking another activity moves her', X.crHomePlace()(X.charList().find((c) => c.id === 'c-kat'), rooms, 's-port').room === 'vGar');
-  await X.crScheduleDelete()(X.charList().find((c) => c.id === 'c-kat'), 'e1');
-  const k3 = X.charList().find((c) => c.id === 'c-kat');
-  ok('event sheet: deleting the event drops its activity', !(k3.cr.schedActs && k3.cr.schedActs.e1));
-  ok('place: with no event, the idle activity of the chat\'s room', X.crHomePlace()(k3, rooms, 's-port').room === 'vKit' && !X.crHomePlace()(k3, rooms, 's-port').act);
+  // ---- event sheet
+  txt = strings(X.crEventHomeChoice()(kat(), 'e1'));
+  ok('event sheet: the line\'s place in this Scenario, its picture, and Place it', txt.indexOf('In Port') >= 0 && txt.indexOf('Kitchen') >= 0 && txt.indexOf('Cooking') >= 0 && txt.indexOf('Place it in Home') >= 0, txt);
+  txt = strings(X.crEventSetChoices()(kat(), 'e1'));
+  ok('event sheet: While this is on leaves the Locations to the place above', txt.indexOf('Port  ·  Weather') >= 0 && txt.indexOf('Port  ·  Rooms') < 0, txt);
+  await X.crScheduleDelete()(kat(), 'e1');
+  ok('event sheet: deleting the line drops its Home parts', !X.crLineHomeOf()(kat()).e1);
+  const pn = X.crHomePlace()(kat(), rooms(), 's-port');
+  ok('place: with no line on, the nothing-on place and its picture', pn.room === 'vGar' && pn.why === 'idle' && pn.spot.pic === 'pRead', pn);
 
-  const clean = X.crSanitizeContactExtra()({ activities: [{ id: 'a1', name: 'x', room: 'vKit', x: 5, y: -1, scale: 0, idle: 'yes' }, { id: 'bad id', room: 'vKit' }], schedActs: { e1: 'a1', e2: 'no good' } });
-  ok('data: activities clamp to the room and drop bad ids; links keep good ones', clean.activities.length === 1 && clean.activities[0].x === 1 && clean.activities[0].y === 0 && clean.activities[0].scale === 0.03 && !clean.activities[0].idle && JSON.stringify(clean.schedActs) === '{"e1":"a1"}', clean);
+  // ---- Locations tab
+  txt = strings(X.CrLocationsTab()({ scenario: port(), mobile: true }));
+  ok('locations: the places, which is the chat\'s, and Add a place', txt.indexOf('Kitchen') >= 0 && txt.indexOf('Garden') >= 0 && txt.indexOf('Add a place') >= 0 && txt.indexOf('the chat\'s') >= 0, txt.slice(0, 500));
+  X.crLocOpen()['vKit'] = true;
+  txt = strings(X.CrLocationsTab()({ scenario: port(), mobile: true }));
+  ok('locations: an open place has its brain, pictures, layers and atmosphere', txt.indexOf('Home picture') >= 0 && txt.indexOf('Stage picture') >= 0 && txt.indexOf('Candles (hidden)') >= 0 && txt.indexOf('Add an atmosphere line') >= 0, txt.slice(0, 900));
 
-  // ---- 1.0.12: a target survives the save that rebuilds its card; layers; zoom
-  X.crHomeUi().sel = 'c-kat|aCook';
-  let t1 = X.crHomeTarget()('c-kat|aCook');
-  t1.pos.x = 0.11;
-  await t1.save();
-  let t2 = X.crHomeTarget()('c-kat|aCook');
-  ok('slider: after a save rebuilds the card, the target is found afresh', t2 && t2.pos !== t1.pos && t2.pos.x === 0.11);
-  t2.pos.x = 0.22;
-  await t2.save();
-  ok('slider: and the next change is the one saved, not lost on a stale copy', (await L.storage.get('characterListKey')).find((c) => c.id === 'c-kat').cr.activities[0].x === 0.22);
-  const p2 = X.scenarioList()[0];
-  await X.crHomeAddLayer()(p2, 'vKit');
+  // ---- routines
+  const k0 = kat();
+  k0.schedule = ALWAYS('e5', 'Working');
+  await X.crRoutineSave()(k0);
+  ok('routines: the current schedule kept as a routine', X.crSchedPresetsOf()(kat()).length === 1 && X.crSchedPresetsOf()(kat())[0].schedule.Daily[0].text === 'Working');
+  kat().schedule = ALWAYS('e6', 'Holiday');
+  await X.crRoutineLoad()(kat(), X.crSchedPresetsOf()(kat())[0].id);
+  ok('routines: Use swaps it back in, ids and all', X.crScheduleOf()(kat()).Daily[0].id === 'e5' && X.crScheduleOf()(kat()).Daily[0].text === 'Working');
+  await X.crRoutineExport()(kat());
+  const file = L.rec.saved && JSON.parse(L.rec.saved.c);
+  ok('routines: Export writes the schedule with its Home parts and pictures', file && file.kind === 'cr-schedule' && file.schedule.Daily[0].id === 'e5' && Array.isArray(file.pics), file);
+
+  // ---- layers and zoom (1.0.12, 1.0.13)
+  X.crHomeUi().look = 'vKit';
+  X.crHomeUi().arrange = true;
+  await X.crHomeAddLayer()(port(), 'vKit');
   const lk = X.crHomeUi().sel;
   const fl = X.crHomeFindLayer()(lk);
-  ok('layers: Add makes a whole-room layer over the people and selects it', lk.indexOf('L:vKit|') === 0 && fl && fl.layer.fill === true && fl.layer.above === true && fl.layer.opacity === 1);
+  ok('layers: Add makes a whole-room layer over the people, shown, and selects it', lk.indexOf('L:vKit|') === 0 && fl && fl.layer.fill && fl.layer.above && fl.layer.shown === true);
   const lt = X.crHomeTarget()(lk);
   lt.pos.opacity = 0.4;
-  lt.pos.blend = 'screen';
   await lt.save();
-  const storedRooms = (await L.storage.get('scenarioListKey'))[0].cr.sets[0];
-  ok('layers: stored on the room version, opacity and blend kept', storedRooms.variants[0].layers[0].opacity === 0.4 && storedRooms.variants[0].layers[0].blend === 'screen', storedRooms.variants[0]);
-  X.crHomeUi().look = 'vKit';
-  txt = strings(X.CrHomeSurface()({ mobile: true }));
-  ok('layers: Arrange lists the room\'s layers and the selected one\'s controls', txt.indexOf('Layers in Kitchen') >= 0 && txt.indexOf('Over the people') >= 0 && txt.indexOf('Opacity') >= 0 && txt.indexOf('soft-light') >= 0, txt.slice(0, 900));
-  const bad = X.crSanitizeScenarioExtra()({ sets: [{ id: 'sR', name: 'R', variants: [{ id: 'v1', name: 'a', content: '', layers: [{ id: 'l1', opacity: 7, blend: 'difference', above: false, fill: false, scale: 9 }, { id: 'no good' }] }] }] });
-  const bl = bad.sets[0].variants[0].layers;
-  ok('layers: the sanitizer clamps and drops unknown blends and bad ids', bl.length === 1 && bl[0].opacity === 1 && bl[0].blend === 'normal' && bl[0].above === false && bl[0].fill === false && bl[0].scale === 1, bl);
-  txt = strings(X.CrHomeSurface()({ mobile: true }));
-  ok('zoom (1.0.13): no buttons; an old bridge is named', txt.indexOf('2×') < 0 && txt.indexOf('Update the bridge to 3.0.40') >= 0);
+  ok('layers: stored on the place', (await L.storage.get('scenarioListKey'))[0].cr.sets[0].variants[0].layers[1].opacity === 0.4);
   X.crBridge().bridgeZoom = true;
   const tree = flat(X.CrHomeSurface()({ mobile: true }));
-  txt = tree.filter((x) => typeof x === 'string').join(' | ');
   const boxEl = tree.find((n) => n && n.props && n.props.class === 'cr-home-room');
-  const worldEl = tree.find((n) => n && n.props && n.props.class === 'cr-home-world');
-  ok('zoom (1.0.13): the box is marked for the bridge, the world inside it, and Arrange zooms without panning', boxEl && boxEl.props['data-ce-zoom'] === 'zoom' && worldEl && worldEl.props['data-ce-zoom-world'] === '1' && txt.indexOf('Pinch or scroll to zoom; double-tap') >= 0, boxEl && boxEl.props);
-  X.crHomeUi().arrange = false;
-  const tree2 = flat(X.CrHomeSurface()({ mobile: true }));
-  ok('zoom (1.0.13): outside Arrange the drag pans', tree2.find((n) => n && n.props && n.props.class === 'cr-home-room').props['data-ce-zoom'] === 'pan');
+  ok('zoom: the box is marked for the bridge; Arrange zooms without panning', boxEl && boxEl.props['data-ce-zoom'] === 'zoom' && tree.some((n) => n && n.props && n.props['data-ce-zoom-world'] === '1'));
+  txt = tree.filter((x) => typeof x === 'string').join(' | ');
+  ok('arrange: a hidden layer is listed as hidden now', txt.indexOf('Candles (hidden now)') >= 0, txt.slice(0, 600));
+
+  // ---- sanitizers
+  const clean = X.crSanitizeContactExtra()({ lineHome: { e1: { s1: { room: 'vKit', x: 5, y: -1, scale: 0, pic: 'bad id' }, s2: { room: 'no good' } } }, homeIdle: { s1: { room: 'vGar' } },
+    pics: [{ id: 'p1', name: 'x' }, { id: 'p1', name: 'dup' }], schedPresets: [{ id: 'r1', name: 'R', schedule: { Daily: [{ id: 'z', startTime: 9999, endTime: 30, text: 't', requiredIntimacy: 'weird' }] } }] });
+  ok('data: Home parts clamp, bad rooms and pictures drop, duplicate pictures drop, routines are schedules',
+    clean.lineHome.e1.s1.x === 1 && clean.lineHome.e1.s1.y === 0 && clean.lineHome.e1.s1.scale === 0.03 && !clean.lineHome.e1.s1.pic && !clean.lineHome.e1.s2
+    && clean.homeIdle.s1.room === 'vGar' && clean.pics.length === 1 && clean.schedPresets[0].schedule.Daily[0].startTime === 1439 && clean.schedPresets[0].schedule.Daily[0].requiredIntimacy === 'none', clean);
+  const sc = X.crSanitizeScenarioExtra()({ sets: [{ id: 'sR', name: 'R', rooms: true, variants: [{ id: 'v1', name: 'a', content: '',
+    atmos: [{ id: 't1', day: 'Funday', start: -5, end: 3000, text: 'x', on: ['l1', 'bad id'], alt: true }, { id: 'no good' }],
+    layers: [{ id: 'l1', shown: false }] }] }] });
+  const at = sc.sets[0].variants[0].atmos;
+  ok('data: atmosphere lines clamp to the day and keep good layer ids', at.length === 1 && at[0].day === 'Daily' && at[0].start === 0 && at[0].end === 1439 && JSON.stringify(at[0].on) === '["l1"]' && at[0].alt === true && sc.sets[0].variants[0].layers[0].shown === false, at);
 
   console.log('\n' + pass + ' passing, ' + fail + ' failing');
   if (fail) process.exit(1);

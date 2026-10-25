@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.13
+version: 1.0.14
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.13. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.14. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -60,9 +60,11 @@ SECTIONS (search "SECTION <NAME>")
   BRIDGE      bridge transport and handshake
   CR-GALLERY  stored images
   CR-STAGE    visual-novel view of the chat
-  CR-HOME     Home: the Scenario's rooms, the chat's people placed by activity, room layers (over or under the
-              people, blend, opacity), pinch / wheel zoom and drag pan (bridge [CR-ZOOM]), Arrange (tap, drag, sliders), look / drop in / follow; with Home on, a speaker is told only their room (crHomeSpeakerRoom, in
-              crBrainView); place logic and the cr.home switch sit in CR-SETS
+  CR-HOME     Home: the Scenario's Locations as rooms; the chat's people placed by their schedule lines' Home parts
+              (per Scenario) or their nothing-on place; layers and atmosphere on the chat clock; pinch / wheel zoom and
+              drag pan (bridge [CR-ZOOM]); Arrange (tap, drag, sliders); look / drop in / follow; Scenario > Locations;
+              Schedule > Routines (saved schedules, file export / import). With Home on, a speaker is told only their
+              room (crHomeSpeakerRoom, in crBrainView); place logic and the cr.home switch sit in CR-SETS
   MACRO-UI    macro list
   SCENARIO / USER / CONTACT   card templates, save, export; smart import (every Import button)
   BUBBLES     markdown helpers, response parser
@@ -4918,6 +4920,7 @@ interface CrSetVariant {
   uc?: string;
   intimacy?: string[];   // relationship levels this version is for (INTIMACY_LIST)
   layers?: CrRoomLayer[];   // a Home room's layers (picture slot l-<id> on the Scenario)
+  atmos?: CrAtmosLine[];    // a place's atmosphere schedule
 }
 
 // [CR-HOME] A picture over or under a room's people: the whole room, or one spot like an activity.
@@ -4931,19 +4934,44 @@ interface CrRoomLayer {
   scale: number;
   opacity: number;
   blend: string;
+  shown?: boolean;     // false: hidden unless an atmosphere line on now shows it
 }
 
-// [CR-HOME] Something a Contact does in a room: its picture (slot a-<id>), where its centre sits as fractions
-// of the room picture, and its width as a fraction of the room's.
-interface CrActivity {
-  id: string;
-  name: string;
+// [CR-HOME] A schedule line's Home part in one Scenario (or a Contact's nothing-on place): the room, where the
+// picture's centre sits as fractions of the room picture, its width as a fraction of the room's, which picture.
+interface CrLineHome {
   room: string;
   x: number;
   y: number;
   scale: number;
-  idle?: boolean;
+  pic?: string;
+}
+
+// A named picture on a Contact (bridge slot a-<id>), shared by any lines that use it.
+interface CrPic {
+  id: string;
+  name: string;
   prompt?: string;
+}
+
+// A place's atmosphere line: while on (chat clock), its words join the place's brain, layers show or hide, and
+// it can have its own Home picture (slot h-<placeId>-<lineId>).
+interface CrAtmosLine {
+  id: string;
+  day: string;
+  start: number;
+  end: number;
+  text: string;
+  on?: string[];
+  off?: string[];
+  alt?: boolean;
+}
+
+// A whole schedule kept on a Contact to swap in.
+interface CrSchedPreset {
+  id: string;
+  name: string;
+  schedule: Record<string, ScheduleEvent[]>;
 }
 
 interface CrBrainSet {
@@ -5008,8 +5036,10 @@ interface CrContactExtra {
   bubbles?: CrBubbleLook;
   sets?: CrBrainSet[];
   schedLinks?: Record<string, Record<string, string>>;   // schedule event id -> set id -> version id
-  activities?: CrActivity[];
-  schedActs?: Record<string, string>;                    // schedule event id -> activity id
+  lineHome?: Record<string, Record<string, CrLineHome>>; // schedule event id -> scenario id -> Home part
+  homeIdle?: Record<string, CrLineHome>;                 // scenario id -> where they are when nothing is on
+  pics?: CrPic[];
+  schedPresets?: CrSchedPreset[];
 }
 
 const CR_MAX_STATUS = 200;
@@ -5432,13 +5462,21 @@ function crSanitizeContactExtra(v: any) : CrContactExtra | undefined
   if (links){
     out.schedLinks = links;
   }
-  const acts = crSanitizeActivities((v as any).activities);
-  if (acts){
-    out.activities = acts;
+  const lineHome = crSanitizeLineHome((v as any).lineHome);
+  if (lineHome){
+    out.lineHome = lineHome;
   }
-  const schedActs = crSanitizeSchedActs((v as any).schedActs);
-  if (schedActs){
-    out.schedActs = schedActs;
+  const homeIdle = crSanitizeHomeIdle((v as any).homeIdle);
+  if (homeIdle){
+    out.homeIdle = homeIdle;
+  }
+  const pics = crSanitizePics((v as any).pics);
+  if (pics){
+    out.pics = pics;
+  }
+  const presets = crSanitizeSchedPresets((v as any).schedPresets);
+  if (presets){
+    out.schedPresets = presets;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -5576,6 +5614,8 @@ function crSanitizeSets(v: any) : CrBrainSet[] | undefined
       if (levels.length){ one.intimacy = levels; }
       const layers = crSanitizeLayers(r.layers);
       if (layers){ one.layers = layers; }
+      const atmos = crSanitizeAtmos(r.atmos);
+      if (atmos){ one.atmos = atmos; }
       vars.push(one);
     }
     const set: CrBrainSet = { id: sid, name: crSanitizeText(raw.name, 80) || "", variants: vars };
@@ -5595,10 +5635,9 @@ catch (e){ api.v1.error("[CR:sets] could not read the brain switches:", e); }
 try{ crSetActive = crSanitizeSetActive(await api.v1.historyStorage.get(CR_SETS_ACTIVE_KEY)); }
 catch (e){ api.v1.error("[CR:sets] could not read the active variants:", e); }
 
-// [CR-HOME] Home (§6.12 step 2, D-117/D-118): rooms are a Scenario set, activities belong to a Contact, and a
-// speaker is told only the room they are in. Home is on per story; off, nothing here touches the context.
+// [CR-HOME] Home (§6.12, D-117/D-118/D-123): rooms are the Scenario's Locations, a Contact's schedule lines carry
+// where they are, and a speaker is told only the room they are in. Home is on per story; off, nothing here touches the context.
 const CR_HOME_KEY = "cr.home";
-const CR_ACT_MAX = 24;
 let crHomeOn = false;
 try{
   const hv: any = await api.v1.storyStorage.get(CR_HOME_KEY);
@@ -5614,36 +5653,41 @@ async function crHomeSetOn(on: boolean) : Promise<void>
   crTouch();
 }
 
-function crSanitizeActivities(v: any) : CrActivity[] | undefined
+const CR_LAYER_MAX = 8;
+
+function crSanitizeAtmos(v: any) : CrAtmosLine[] | undefined
 {
   if (!Array.isArray(v)){
     return undefined;
   }
-  const out: CrActivity[] = [];
-  const num = (x: any, lo: number, hi: number, d: number) => {
-    const n = Number(x);
-    return isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  const out: CrAtmosLine[] = [];
+  const ids = (x: any) => {
+    const list = Array.isArray(x) ? x.filter((y: any) => typeof y === "string" && /^[A-Za-z0-9_-]{1,24}$/.test(y)).slice(0, CR_LAYER_MAX) : [];
+    return list.length ? list : undefined;
   };
-  for (let i = 0; i < v.length && out.length < CR_ACT_MAX; i++){
+  for (let i = 0; i < v.length && out.length < 16; i++){
     const r = v[i];
     const id = (r && typeof r === "object") ? crSanitizeText(r.id, 24) : undefined;
-    const room = (r && typeof r === "object") ? crSanitizeText(r.room, 24) : undefined;
-    if (!id || !/^[A-Za-z0-9_-]+$/.test(id) || !room || !/^[A-Za-z0-9_-]+$/.test(room)){
+    if (!id || !/^[A-Za-z0-9_-]+$/.test(id)){
       continue;
     }
-    const a: CrActivity = {
-      id: id, name: crSanitizeText(r.name, 80) || "", room: room,
-      x: num(r.x, 0, 1, 0.5), y: num(r.y, 0, 1, 0.6), scale: num(r.scale, 0.03, 1, 0.25)
+    const st = Math.round(Number(r.start));
+    const en = Math.round(Number(r.end));
+    const a: CrAtmosLine = {
+      id: id, day: (DAY_LIST as readonly string[]).indexOf(r.day) >= 0 ? r.day : "Daily",
+      start: isFinite(st) ? Math.max(0, Math.min(1439, st)) : 0,
+      end: isFinite(en) ? Math.max(0, Math.min(1439, en)) : 0,
+      text: crSanitizeText(r.text, 400) || ""
     };
-    if (r.idle === true){ a.idle = true; }
-    const p = crSanitizeText(r.prompt, 400);
-    if (p){ a.prompt = p; }
+    const on = ids(r.on);
+    const off = ids(r.off);
+    if (on){ a.on = on; }
+    if (off){ a.off = off; }
+    if (r.alt === true){ a.alt = true; }
     out.push(a);
   }
   return out.length ? out : undefined;
 }
-
-const CR_LAYER_MAX = 8;
 
 function crSanitizeLayers(v: any) : CrRoomLayer[] | undefined
 {
@@ -5667,75 +5711,292 @@ function crSanitizeLayers(v: any) : CrRoomLayer[] | undefined
       above: r.above !== false, fill: r.fill !== false,
       x: num(r.x, 0, 1, 0.5), y: num(r.y, 0, 1, 0.5), scale: num(r.scale, 0.03, 1, 0.5),
       opacity: num(r.opacity, 0, 1, 1),
-      blend: blends.indexOf(r.blend) >= 0 ? r.blend : "normal"
+      blend: blends.indexOf(r.blend) >= 0 ? r.blend : "normal",
+      shown: r.shown !== false
     });
   }
   return out.length ? out : undefined;
 }
 
-function crSanitizeSchedActs(v: any) : Record<string, string> | undefined
+// [CR-HOME] Home, reorganised (D-123): a Contact's schedule lines carry Home. Each line keeps, per Scenario, a room,
+// a spot (centre x, y and width as fractions of the room's picture) and a picture from the Contact's own list;
+// the Contact also keeps where they are when no line is on. AnotherRoom's ScheduleEvent is never touched.
+const CR_PIC_MAX = 40;
+
+function crSanitizeLineRec(r: any) : CrLineHome | undefined
+{
+  if (!r || typeof r !== "object"){
+    return undefined;
+  }
+  const room = crSanitizeText(r.room, 24);
+  if (!room || !/^[A-Za-z0-9_-]+$/.test(room)){
+    return undefined;
+  }
+  const num = (x: any, lo: number, hi: number, d: number) => {
+    const n = Number(x);
+    return isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  };
+  const out: CrLineHome = { room: room, x: num(r.x, 0, 1, 0.5), y: num(r.y, 0, 1, 0.6), scale: num(r.scale, 0.03, 1, 0.25) };
+  const pic = crSanitizeText(r.pic, 24);
+  if (pic && /^[A-Za-z0-9_-]+$/.test(pic)){
+    out.pic = pic;
+  }
+  return out;
+}
+
+function crSanitizeLineHome(v: any) : Record<string, Record<string, CrLineHome>> | undefined
 {
   if (!v || typeof v !== "object"){
     return undefined;
   }
-  const out: Record<string, string> = {};
-  Object.keys(v).slice(0, 200).forEach((k) => {
-    if (k.length <= 64 && typeof v[k] === "string" && /^[A-Za-z0-9_-]{1,24}$/.test(v[k])){
-      out[k] = v[k];
+  const out: Record<string, Record<string, CrLineHome>> = {};
+  Object.keys(v).slice(0, 300).forEach((eid) => {
+    const row = v[eid];
+    if (eid.length > 64 || !row || typeof row !== "object"){
+      return;
     }
+    const keep: Record<string, CrLineHome> = {};
+    Object.keys(row).slice(0, 32).forEach((sid) => {
+      const rec = sid.length <= 64 ? crSanitizeLineRec(row[sid]) : undefined;
+      if (rec){ keep[sid] = rec; }
+    });
+    if (Object.keys(keep).length){ out[eid] = keep; }
   });
   return Object.keys(out).length ? out : undefined;
 }
 
-function crActivitiesOf(char: Character | undefined) : CrActivity[]
+function crSanitizeHomeIdle(v: any) : Record<string, CrLineHome> | undefined
 {
-  const extra: any = char ? char.cr : undefined;
-  return (extra && Array.isArray(extra.activities)) ? extra.activities : [];
+  if (!v || typeof v !== "object"){
+    return undefined;
+  }
+  const out: Record<string, CrLineHome> = {};
+  Object.keys(v).slice(0, 32).forEach((sid) => {
+    const rec = sid.length <= 64 ? crSanitizeLineRec(v[sid]) : undefined;
+    if (rec){ out[sid] = rec; }
+  });
+  return Object.keys(out).length ? out : undefined;
 }
 
-function crSchedActsOf(char: Character | undefined) : Record<string, string>
+function crSanitizePics(v: any) : CrPic[] | undefined
 {
-  const extra: any = char ? char.cr : undefined;
-  return (extra && extra.schedActs) ? extra.schedActs : {};
+  if (!Array.isArray(v)){
+    return undefined;
+  }
+  const out: CrPic[] = [];
+  for (let i = 0; i < v.length && out.length < CR_PIC_MAX; i++){
+    const r = v[i];
+    const id = (r && typeof r === "object") ? crSanitizeText(r.id, 24) : undefined;
+    if (!id || !/^[A-Za-z0-9_-]+$/.test(id) || out.some((p) => p.id === id)){
+      continue;
+    }
+    const p: CrPic = { id: id, name: crSanitizeText(r.name, 80) || "" };
+    const pr = crSanitizeText(r.prompt, 400);
+    if (pr){ p.prompt = pr; }
+    out.push(p);
+  }
+  return out.length ? out : undefined;
 }
 
-// The Scenario's set of rooms: the one marked Home rooms, else its first set.
+// A copy of a schedule, for a routine saved on the card: AnotherRoom's event shape, nothing else.
+function crSanitizeScheduleCopy(v: any) : Record<string, ScheduleEvent[]> | undefined
+{
+  if (!v || typeof v !== "object"){
+    return undefined;
+  }
+  const out: Record<string, ScheduleEvent[]> = {};
+  let n = 0;
+  for (const d of DAY_LIST){
+    const list: any[] = Array.isArray(v[d]) ? v[d] : [];
+    out[d] = [];
+    for (let i = 0; i < list.length && i < 48; i++){
+      const e = list[i];
+      if (!e || typeof e !== "object" || typeof e.id !== "string"){
+        continue;
+      }
+      const st = Math.round(Number(e.startTime));
+      const en = Math.round(Number(e.endTime));
+      out[d].push({
+        id: e.id.slice(0, 64),
+        startTime: isFinite(st) ? Math.max(0, Math.min(1439, st)) : 0,
+        endTime: isFinite(en) ? Math.max(0, Math.min(1439, en)) : 0,
+        text: typeof e.text === "string" ? e.text.slice(0, 400) : "",
+        requiredIntimacy: (REQUIRED_INTIMACY_LIST as readonly string[]).indexOf(e.requiredIntimacy) >= 0 ? e.requiredIntimacy : "none"
+      });
+      n++;
+    }
+  }
+  return n ? out : undefined;
+}
+
+function crSanitizeSchedPresets(v: any) : CrSchedPreset[] | undefined
+{
+  if (!Array.isArray(v)){
+    return undefined;
+  }
+  const out: CrSchedPreset[] = [];
+  for (let i = 0; i < v.length && out.length < 12; i++){
+    const r = v[i];
+    const id = (r && typeof r === "object") ? crSanitizeText(r.id, 24) : undefined;
+    const sched = r ? crSanitizeScheduleCopy(r.schedule) : undefined;
+    if (!id || !/^[A-Za-z0-9_-]+$/.test(id) || !sched){
+      continue;
+    }
+    out.push({ id: id, name: crSanitizeText(r.name, 80) || "Routine", schedule: sched });
+  }
+  return out.length ? out : undefined;
+}
+
+function crLineHomeOf(char: Character | undefined) : Record<string, Record<string, CrLineHome>>
+{
+  const extra: any = char ? char.cr : undefined;
+  return (extra && extra.lineHome) ? extra.lineHome : {};
+}
+
+function crHomeIdleOf(char: Character | undefined) : Record<string, CrLineHome>
+{
+  const extra: any = char ? char.cr : undefined;
+  return (extra && extra.homeIdle) ? extra.homeIdle : {};
+}
+
+function crPicsOf(char: Character | undefined) : CrPic[]
+{
+  const extra: any = char ? char.cr : undefined;
+  return (extra && Array.isArray(extra.pics)) ? extra.pics : [];
+}
+
+function crSchedPresetsOf(char: Character | undefined) : CrSchedPreset[]
+{
+  const extra: any = char ? char.cr : undefined;
+  return (extra && Array.isArray(extra.schedPresets)) ? extra.schedPresets : [];
+}
+
+// A picture's bridge slot. "a-" because 1.0.11's activity pictures became these pictures and kept their files.
+function crPicSlot(picId: string) : string
+{
+  return "a-" + picId;
+}
+
+// The Scenario's locations: the set marked Home rooms (the Locations tab).
 function crHomeRoomsSet(scenario: Scenario | undefined) : CrBrainSet | undefined
 {
   if (!scenario){
     return undefined;
   }
-  const sets = crCardSets(scenario);
-  return sets.find((s) => s.rooms) || sets[0];
+  return crCardSets(scenario).find((s) => s.rooms);
 }
 
-type CrHomePlace = { room: string; act?: CrActivity; why: string };
+// A place's atmosphere lines that are on now, on the chat clock.
+function crAtmosLive(v: CrSetVariant | undefined) : CrAtmosLine[]
+{
+  if (!v || !v.atmos || !v.atmos.length){
+    return [];
+  }
+  const ms = crClockNow();
+  const minutes = crMinutesOfDay(ms);
+  const today = crWeekdayOf(ms);
+  return v.atmos.filter((a) => (a.day === "Daily" || a.day === today) &&
+    crSchedLive({ id: a.id, startTime: a.start, endTime: a.end, text: "", requiredIntimacy: "none" }, minutes));
+}
 
-// Where a Contact is: the activity their current schedule event names, else the room it links, else the chat's
-// room as schedule, relationship or the first version leave it (never the author's pin, which is the User's).
+function crLayerShown(v: CrSetVariant, l: CrRoomLayer) : boolean
+{
+  const live = crAtmosLive(v);
+  if (live.some((a) => !!a.off && a.off.indexOf(l.id) >= 0)){
+    return false;
+  }
+  if (live.some((a) => !!a.on && a.on.indexOf(l.id) >= 0)){
+    return true;
+  }
+  return l.shown !== false;
+}
+
+function crRoomPicSlot(v: CrSetVariant) : string
+{
+  const alt = crAtmosLive(v).find((a) => a.alt);
+  return alt ? ("h-" + v.id + "-" + alt.id) : ("h-" + v.id);
+}
+
+type CrHomePlace = { room: string; spot?: CrLineHome; line: string; why: string };
+
+// Where a Contact is in this Scenario: the first schedule line on now that has a Home part here, else a line that
+// links the room through While this is on, else where they are when nothing is on, else the chat's room as the
+// schedule, relationship or first version leave it (never the author's pin, which is the User's).
 function crHomePlace(char: Character, rooms: CrBrainSet, scenarioId: string) : CrHomePlace
 {
-  const acts = crActivitiesOf(char);
   const inRooms = (id: string) => rooms.variants.some((v) => v.id === id);
-  const idle = (room: string) => acts.find((a) => a.room === room && a.idle);
   const live = crStatusRead(char).live;
-  const actLinks = crSchedActsOf(char);
+  const homes = crLineHomeOf(char);
   for (let i = 0; i < live.length; i++){
-    const act = acts.find((a) => a.id === actLinks[live[i].id]);
-    if (act && inRooms(act.room)){
-      return { room: act.room, act: act, why: "schedule" };
+    const rec = homes[live[i].id] ? homes[live[i].id][scenarioId] : undefined;
+    if (rec && inRooms(rec.room)){
+      return { room: rec.room, spot: rec, line: live[i].id, why: "schedule" };
     }
   }
   const links = crSchedLinksOf(char);
   for (let i = 0; i < live.length; i++){
     const vid = links[live[i].id] ? links[live[i].id][rooms.id] : undefined;
     if (vid && inRooms(vid)){
-      return { room: vid, act: idle(vid), why: "schedule" };
+      return { room: vid, line: live[i].id, why: "schedule" };
     }
   }
+  const idle = crHomeIdleOf(char)[scenarioId];
+  if (idle && inRooms(idle.room)){
+    return { room: idle.room, spot: idle, line: CR_HOME_IDLE, why: "idle" };
+  }
   const auto = crSetResolve(rooms, scenarioId, true).v;
-  const room = auto ? auto.id : rooms.variants[0].id;
-  return { room: room, act: idle(room), why: "default" };
+  return { room: auto ? auto.id : rooms.variants[0].id, line: "", why: "default" };
+}
+
+const CR_HOME_IDLE = "_idle";
+
+// 1.0.11–1.0.13 kept activities beside the schedule; fold them into the lines once, at load (D-123).
+function crMigrateActivities(list: any[]) : boolean
+{
+  let changed = false;
+  for (let i = 0; i < (list || []).length; i++){
+    const c = list[i];
+    const cr = c ? c.cr : undefined;
+    if (!cr || (!Array.isArray(cr.activities) && !cr.schedActs)){
+      continue;
+    }
+    const acts: any[] = Array.isArray(cr.activities) ? cr.activities : [];
+    const links: any = cr.schedActs || {};
+    const pics: any[] = Array.isArray(cr.pics) ? cr.pics.slice() : [];
+    const lh: any = cr.lineHome || {};
+    const idle: any = cr.homeIdle || {};
+    const owner = (room: string) => scenarioList.find((s) => crCardSets(s).some((set) => set.variants.some((v) => v.id === room)));
+    acts.forEach((a: any) => {
+      if (!a || typeof a.id !== "string"){
+        return;
+      }
+      if (!pics.some((p: any) => p.id === a.id)){
+        pics.push({ id: a.id, name: a.name || "Picture", prompt: a.prompt });
+      }
+      const sc = owner(String(a.room || ""));
+      if (!sc){
+        return;
+      }
+      const rec = { room: a.room, x: a.x, y: a.y, scale: a.scale, pic: a.id };
+      Object.keys(links).forEach((eid) => {
+        if (links[eid] === a.id){
+          lh[eid] = lh[eid] || {};
+          if (!lh[eid][sc.id]){ lh[eid][sc.id] = Object.assign({}, rec); }
+        }
+      });
+      if (a.idle && !idle[sc.id]){
+        idle[sc.id] = Object.assign({}, rec);
+      }
+    });
+    cr.pics = pics;
+    cr.lineHome = lh;
+    cr.homeIdle = idle;
+    delete cr.activities;
+    delete cr.schedActs;
+    c.cr = crSanitizeContactExtra(cr);
+    changed = true;
+  }
+  return changed;
 }
 
 // The User is with the paired Contact unless the author dropped in somewhere (a pin on the rooms set).
@@ -5870,13 +6131,13 @@ function crSetResolve(set: CrBrainSet, ownerId: string, ignorePin?: boolean) : C
   }
   const src = crSetScheduleCard(ownerId);
   const links = crSchedLinksOf(src);
-  const actLinks = crSchedActsOf(src);
-  if (src && (Object.keys(links).length || Object.keys(actLinks).length)){
+  const homes = crLineHomeOf(src);
+  if (src && (Object.keys(links).length || Object.keys(homes).length)){
     const live = crStatusRead(src).live;
-    const acts = crActivitiesOf(src);
     for (let i = 0; i < live.length; i++){
-      const act = acts.find((a) => a.id === actLinks[live[i].id]);
-      const vid = (links[live[i].id] && links[live[i].id][set.id]) || (act ? act.room : undefined);
+      // A Scenario's set also follows the place the line happens in, in that Scenario (D-123).
+      const rec = homes[live[i].id] ? homes[live[i].id][ownerId] : undefined;
+      const vid = (links[live[i].id] && links[live[i].id][set.id]) || (rec ? rec.room : undefined);
       const v = vid ? set.variants.find((x) => x.id === vid) : undefined;
       if (v){
         return { v: v, why: "schedule", event: (live[i].text || "").trim() };
@@ -5943,7 +6204,10 @@ function crBrainView(card: any) : any
   for (let i = 0; i < sets.length; i++){
     const mine = !!home && sets[i].id === home.setId;
     const v = mine ? home!.v : crSetActiveVariant(sets[i], card.id);
-    const content = v ? (mine ? [v.content.trim(), home!.line].filter(Boolean).join("\n") : v.content) : "";
+    // A place's atmosphere lines on now join its brain (D-123); with none, the version's text as before.
+    const atmos = v ? crAtmosLive(v).map((a) => (a.text || "").trim()).filter(Boolean) : [];
+    const said = v ? (atmos.length ? [v.content.trim()].concat(atmos).filter(Boolean).join("\n") : v.content) : "";
+    const content = v ? (mine ? [said.trim(), home!.line].filter(Boolean).join("\n") : said) : "";
     if (v && content.trim()){
       copy.brains.push({ name: (sets[i].name || "Set") + ": " + (v.name || "Variant"), content: content });
     }
@@ -6188,7 +6452,12 @@ function CrBrainSetsEditor(props: { card: CrAnyCard; kind: CrCardKind; mobile: b
       + "undo takes a switch back."
   }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_4 } },
     sets.length === 0 ? h(CrEmpty, { text: "No sets on this card." }) : null,
+    (props.kind === "scenario" && sets.some((s) => s.rooms)) ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } },
+      "This Scenario's locations are on its Locations tab.") : null,
     sets.map((s, si) => {
+      if (props.kind === "scenario" && s.rooms){
+        return null;
+      }
       const active = crSetActiveVariant(s, card.id);
       return h("div", { key: s.id, style: Object.assign({}, rowStyle, { gap: CR_S_4 }) },
         h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center", flexWrap: "wrap" } },
@@ -6203,13 +6472,6 @@ function CrBrainSetsEditor(props: { card: CrAnyCard; kind: CrCardKind; mobile: b
           options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }],
           active: s.wear ? "on" : "off",
           onPick: (id: string) => { sets[si].wear = id === "on" ? true : undefined; commit(); }
-        }) : null,
-        props.kind === "scenario" ? h(CrChoice, {
-          label: "Home rooms",
-          hint: "On: each version is a room in Home, with its own Home picture of any shape (seen from above works best).",
-          options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }],
-          active: s.rooms ? "on" : "off",
-          onPick: (id: string) => { sets[si].rooms = id === "on" ? true : undefined; commit(); }
         }) : null,
         props.kind === "scenario" ? h(CrChoice, {
           label: "Stage backdrop",
@@ -6254,15 +6516,7 @@ function CrBrainSetsEditor(props: { card: CrAnyCard; kind: CrCardKind; mobile: b
               onSet: (x: string) => { sets[si].variants[vi].uc = x.slice(0, 600) || undefined; commit(); } })),
           h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
             h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(card.id, crVariantSlot(v)).catch(() => {}); } }),
-            h(CrButton, { text: "Generate picture", icon: "", onClick: () => { crGenerateVariantImage(card, props.kind, s, v).catch(() => {}); } })),
-          (props.kind === "scenario" && s.rooms) ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
-            h("div", {
-              style: { position: "relative", width: "44px", height: "44px", flex: "0 0 auto", borderRadius: CR_RADIUS_S,
-                       overflow: "hidden", background: CR_FILL2, border: CR_LINE_W + " solid " + CR_LINE }
-            }, crImgAnchor(card.id, "h-" + v.id, "fit=cover,collapse=1",
-                 { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block" })),
-            h(CrButton, { text: "Upload Home picture", icon: "", onClick: () => { crSlotUpload(card.id, "h-" + v.id).catch(() => {}); } }),
-            h(CrButton, { text: "Generate Home picture", icon: "", onClick: () => { crHomeGenerateRoom(card as Scenario, v).catch(() => {}); } })) : null
+            h(CrButton, { text: "Generate picture", icon: "", onClick: () => { crGenerateVariantImage(card, props.kind, s, v).catch(() => {}); } }))
         )),
         h(CrButton, {
           text: "Add a " + word.toLowerCase(), icon: "",
@@ -10497,6 +10751,7 @@ function CrScenarioProfile(props: { st: CrUiState; scenario: Scenario }) : any
   const tabs = [
     { id: "about", label: "About" },
     { id: "brains", label: "Brains" },
+    { id: "locations", label: "Locations" },
     { id: "photos", label: "Banner" },
     { id: "visuals", label: "Visuals" }
   ];
@@ -10537,6 +10792,9 @@ function CrScenarioProfile(props: { st: CrUiState; scenario: Scenario }) : any
   }
   else if (tab === "brains"){
     body = h(CrBrainsTab, { card: scenario, kind: "scenario", mobile: mob });
+  }
+  else if (tab === "locations"){
+    body = h(CrLocationsTab, { scenario: scenario, mobile: mob });
   }
   else if (tab === "photos"){
     body = h(CrSection, {
@@ -10971,27 +11229,15 @@ async function crScheduleDelete(char: Character, id: string) : Promise<void>
     sched[d] = sched[d].filter((e) => e.id !== id);
   }
   const links = Object.assign({}, crSchedLinksOf(char));
-  const acts = Object.assign({}, crSchedActsOf(char));
-  if (links[id] || acts[id]){
+  const homes = Object.assign({}, crLineHomeOf(char));
+  if (links[id] || homes[id]){
     delete links[id];
-    delete acts[id];
+    delete homes[id];
     const extra: any = char.cr || {};
     extra.schedLinks = links;
-    extra.schedActs = acts;
+    extra.lineHome = homes;
     char.cr = crSanitizeContactExtra(extra);
   }
-  await crScheduleSave(char);
-}
-
-// [CR-HOME] While this event is on, the Contact does this activity (its room follows). Empty = none.
-async function crScheduleActSet(char: Character, eventId: string, actId: string) : Promise<void>
-{
-  const acts: Record<string, string> = Object.assign({}, crSchedActsOf(char));
-  if (actId){ acts[eventId] = actId; }
-  else { delete acts[eventId]; }
-  const extra: any = char.cr || {};
-  extra.schedActs = acts;
-  char.cr = crSanitizeContactExtra(extra);
   await crScheduleSave(char);
 }
 
@@ -11097,7 +11343,7 @@ function CrEventSheet() : any
       active: evt.requiredIntimacy || "none",
       onPick: (id: string) => set({ requiredIntimacy: id })
     }),
-    crEventActChoice(char, evt.id),
+    crEventHomeChoice(char, evt.id),
     crEventSetChoices(char, evt.id),
     h("div", { style: { display: "flex", gap: CR_S_3, flexWrap: "wrap", paddingTop: CR_S_2 } },
       h(CrButton, { text: "Close", onClick: () => { crCloseEventSheet().catch(() => {}); } }),
@@ -11119,25 +11365,6 @@ function CrEventSheet() : any
   );
 }
 
-// [CR-HOME] The event sheet's Activity: what they do in Home while it is on; its room moves them there.
-function crEventActChoice(char: Character, eventId: string) : any
-{
-  const acts = crActivitiesOf(char);
-  if (!acts.length){
-    return null;
-  }
-  const scenario = crLiveScenario();
-  const rooms = crHomeRoomsSet(scenario);
-  const roomName = (id: string) => { const v = rooms ? rooms.variants.find((x) => x.id === id) : undefined; return v ? (v.name || "a room") : "another Scenario's room"; };
-  return h(CrChoice, {
-    label: "Activity",
-    hint: "What they are doing in Home while this is on; it puts them in that activity's room.",
-    options: [{ id: "", label: "None" }].concat(acts.map((a) => ({ id: a.id, label: (a.name || "Unnamed") + " (" + roomName(a.room) + ")" }))),
-    active: crSchedActsOf(char)[eventId] || "",
-    onPick: (id: string) => { crScheduleActSet(char, eventId, id).catch(() => {}); }
-  });
-}
-
 // The event sheet's "While this is on": one choice per set on this Contact and on the paired Scenario.
 function crEventSetChoices(char: Character, eventId: string) : any
 {
@@ -11149,7 +11376,8 @@ function crEventSetChoices(char: Character, eventId: string) : any
   }
   const rows: any[] = [];
   owners.forEach((o) => {
-    crCardSets(o.card).filter((x) => x.variants.length > 0).forEach((x) => {
+    // A Scenario's Locations are chosen above, by where the line happens (D-123).
+    crCardSets(o.card).filter((x) => x.variants.length > 0 && !x.rooms).forEach((x) => {
       rows.push(h(CrChoice, {
         key: o.card.id + "|" + x.id,
         label: o.label + "  ·  " + (x.name || "Set"),
@@ -11358,7 +11586,8 @@ function CrScheduleTab(props: { char: Character; mobile: boolean }) : any
           onClick: () => { crScheduleAdd(char, day).catch(() => {}); }
         })
       )
-    )
+    ),
+    h(CrRoutinesSection, { char: char })
   );
 }
 
@@ -21983,12 +22212,12 @@ function CrStageSurface(props: { mobile: boolean }) : any
 }
 
 // ============================================================================
-// SECTION CR-HOME — HOME: ROOMS, FIGURES, ACTIVITIES, LAYERS (§6.12 step 2, D-117, D-118, D-120, D-121)
+// SECTION CR-HOME — HOME: ROOMS, FIGURES, LAYERS, LOCATIONS (§6.12, D-117, D-118, D-120–D-123)
 // ============================================================================
 // A room's box takes its Home picture's own ratio (the bridge's --ce-img-ar), and every position is a fraction
-// of that box, so nothing is measured. Each figure and placed layer is its own ar-host so its picture keeps its
-// shape (§6.8b). Zoom and pan are the bridge's: pinch, wheel and drag act on the world in the page, with no
-// round trip to the script (D-122).
+// of that box, so nothing is measured. Each figure and layer is its own ar-host so its picture keeps its shape
+// (§6.8b). Zoom and pan are the bridge's (D-122). A figure is a schedule line's Home part in this Scenario, or
+// the Contact's place when nothing is on (D-123).
 const CR_HOME_GRID = 10;
 const CR_LAYER_BLENDS = ["normal", "screen", "lighten", "overlay", "soft-light", "multiply"];
 
@@ -21996,9 +22225,10 @@ type CrHomeUi = { look: string; arrange: boolean; sel: string; drag: string };
 let crHomeUi: CrHomeUi = { look: "", arrange: false, sel: "", drag: "" };
 let crHomeSaveTimer = 0;
 
-function crHomeKey(charId: string, actId: string) : string
+// charId|lineId (a schedule line's spot here, or _idle) — L:roomId|layerId for a layer.
+function crHomeKey(charId: string, lineId: string) : string
 {
-  return charId + "|" + actId;
+  return charId + "|" + lineId;
 }
 
 function crHomeLayerKey(roomId: string, layerId: string) : string
@@ -22006,15 +22236,105 @@ function crHomeLayerKey(roomId: string, layerId: string) : string
   return "L:" + roomId + "|" + layerId;
 }
 
-function crHomeFind(key: string) : { char: Character; act: CrActivity } | undefined
+function crHomeFind(key: string) : { char: Character; rec: CrLineHome; line: string } | undefined
 {
   const at = key.indexOf("|");
-  if (at < 0 || key.indexOf("L:") === 0){
+  const scenario = crLiveScenario();
+  if (at < 0 || key.indexOf("L:") === 0 || !scenario){
     return undefined;
   }
   const char = charList.find((c) => c.id === key.slice(0, at));
-  const act = crActivitiesOf(char).find((a) => a.id === key.slice(at + 1));
-  return (char && act) ? { char: char, act: act } : undefined;
+  const line = key.slice(at + 1);
+  if (!char || !line){
+    return undefined;
+  }
+  const rec = line === CR_HOME_IDLE
+    ? crHomeIdleOf(char)[scenario.id]
+    : (crLineHomeOf(char)[line] ? crLineHomeOf(char)[line][scenario.id] : undefined);
+  return rec ? { char: char, rec: rec, line: line } : undefined;
+}
+
+// A line's label for the Home panel: its time and text, found across the week.
+function crLineLabel(char: Character, lineId: string) : string
+{
+  if (lineId === CR_HOME_IDLE){
+    return "When nothing is on";
+  }
+  const found = crScheduleFind(char, lineId);
+  if (!found){
+    return "A removed line";
+  }
+  return (found.day === "Daily" ? "" : found.day.slice(0, 3) + " ") + crFmtHM(found.evt.startTime) + " "
+    + ((found.evt.text || "").trim() || "No text yet");
+}
+
+async function crHomeSaveChar(char: Character) : Promise<void>
+{
+  const extra: any = char.cr || {};
+  char.cr = crSanitizeContactExtra(extra);
+  await crCommitCard("contact", "the Home places", char);
+}
+
+// Give a line (or nothing-on) a Home part in this Scenario's room, keeping its spot and picture if it had one.
+async function crHomePlaceLine(char: Character, lineId: string, scenarioId: string, room: string) : Promise<void>
+{
+  const extra: any = char.cr || {};
+  if (lineId === CR_HOME_IDLE){
+    const idle = Object.assign({}, crHomeIdleOf(char));
+    const was = idle[scenarioId];
+    idle[scenarioId] = was ? Object.assign({}, was, { room: room }) : { room: room, x: 0.5, y: 0.6, scale: 0.25 };
+    extra.homeIdle = idle;
+  }
+  else {
+    const lh: any = JSON.parse(JSON.stringify(crLineHomeOf(char)));
+    const row = lh[lineId] || {};
+    const was = row[scenarioId];
+    row[scenarioId] = was ? Object.assign({}, was, { room: room }) : { room: room, x: 0.5, y: 0.6, scale: 0.25 };
+    lh[lineId] = row;
+    extra.lineHome = lh;
+  }
+  char.cr = extra;
+  crHomeUi.sel = crHomeKey(char.id, lineId);
+  await crHomeSaveChar(char);
+}
+
+async function crHomeUnplace(char: Character, lineId: string, scenarioId: string) : Promise<void>
+{
+  const extra: any = char.cr || {};
+  if (lineId === CR_HOME_IDLE){
+    const idle = Object.assign({}, crHomeIdleOf(char));
+    delete idle[scenarioId];
+    extra.homeIdle = idle;
+  }
+  else {
+    const lh: any = JSON.parse(JSON.stringify(crLineHomeOf(char)));
+    if (lh[lineId]){
+      delete lh[lineId][scenarioId];
+      if (!Object.keys(lh[lineId]).length){ delete lh[lineId]; }
+    }
+    extra.lineHome = lh;
+  }
+  char.cr = extra;
+  crHomeUi.sel = "";
+  await crHomeSaveChar(char);
+}
+
+// A new named picture on the Contact, given to the line it was made for.
+async function crHomeNewPic(char: Character, key: string, name: string) : Promise<void>
+{
+  const pics = crPicsOf(char).slice();
+  if (pics.length >= CR_PIC_MAX){
+    try{ await api.v1.ui.toast("That is as many pictures as one card keeps.", { type: "warning" }); }
+    catch (e){}
+    return;
+  }
+  const pic: CrPic = { id: crShortId("p"), name: name.slice(0, 80) || "Picture" };
+  pics.push(pic);
+  const extra: any = char.cr || {};
+  extra.pics = pics;
+  const f = crHomeFind(key);
+  if (f){ f.rec.pic = pic.id; }
+  await crHomeSaveChar(char);
 }
 
 function crHomeFindLayer(key: string) : { scenario: Scenario; room: CrSetVariant; layer: CrRoomLayer } | undefined
@@ -22030,13 +22350,13 @@ function crHomeFindLayer(key: string) : { scenario: Scenario; room: CrSetVariant
   return (scenario && room && layer) ? { scenario: scenario, room: room, layer: layer } : undefined;
 }
 
-// Whatever is selected in Arrange — an activity or a layer — looked up fresh every time, because a save
+// Whatever is selected in Arrange — a line's spot or a layer — looked up fresh every time, because a save
 // rebuilds the card and an object held from an earlier render would be a stale copy.
 function crHomeTarget(key: string) : { pos: any; save: () => Promise<void> } | undefined
 {
   const a = crHomeFind(key);
   if (a){
-    return { pos: a.act, save: () => crHomeSaveActs(a.char) };
+    return { pos: a.rec, save: () => crHomeSaveChar(a.char) };
   }
   const l = crHomeFindLayer(key);
   if (l){
@@ -22062,37 +22382,6 @@ function crHomeSaveSoon(key: string) : void
   }, 500).then((id: number) => { crHomeSaveTimer = id; }).catch(() => {});
 }
 
-async function crHomeSaveActs(char: Character, list?: CrActivity[]) : Promise<void>
-{
-  const extra: any = char.cr || {};
-  extra.activities = list || crActivitiesOf(char);
-  char.cr = crSanitizeContactExtra(extra);
-  await crCommitCard("contact", "the activities", char);
-}
-
-async function crHomeAddActivity(char: Character, room: string) : Promise<void>
-{
-  const list = crActivitiesOf(char).slice();
-  if (list.length >= CR_ACT_MAX){
-    try{ await api.v1.ui.toast("That is as many activities as one card keeps.", { type: "warning" }); }
-    catch (e){}
-    return;
-  }
-  const act: CrActivity = { id: crShortId("a"), name: "", room: room, x: 0.5, y: 0.6, scale: 0.25 };
-  list.push(act);
-  crHomeUi.sel = crHomeKey(char.id, act.id);
-  await crHomeSaveActs(char, list);
-}
-
-async function crHomeRemoveActivity(key: string) : Promise<void>
-{
-  const f = crHomeFind(key);
-  if (!f){
-    return;
-  }
-  crHomeUi.sel = "";
-  await crHomeSaveActs(f.char, crActivitiesOf(f.char).filter((a) => a.id !== f.act.id));
-}
 
 async function crHomeAddLayer(scenario: Scenario, roomId: string) : Promise<void>
 {
@@ -22108,7 +22397,7 @@ async function crHomeAddLayer(scenario: Scenario, roomId: string) : Promise<void
     catch (e){}
     return;
   }
-  const layer: CrRoomLayer = { id: crShortId("l"), name: "", above: true, fill: true, x: 0.5, y: 0.5, scale: 0.5, opacity: 1, blend: "normal" };
+  const layer: CrRoomLayer = { id: crShortId("l"), name: "", above: true, fill: true, x: 0.5, y: 0.5, scale: 0.5, opacity: 1, blend: "normal", shown: true };
   list.push(layer);
   room.layers = list;
   crHomeUi.sel = crHomeLayerKey(roomId, layer.id);
@@ -22160,7 +22449,7 @@ function crImgReqSettings(compiled: { start: string; mid: string; quality: strin
   };
 }
 
-async function crHomeGenerateActivity(char: Character, act: CrActivity) : Promise<void>
+async function crHomeGeneratePic(char: Character, pic: CrPic) : Promise<void>
 {
   if (!crBridge.ready){
     try{ await api.v1.ui.toast("The bridge is not connected, so nothing can generate.", { type: "warning" }); }
@@ -22174,19 +22463,20 @@ async function crHomeGenerateActivity(char: Character, act: CrActivity) : Promis
     return;
   }
   const base = crAssembleBasePrompt(char, "illustrate");
-  const slot = "a-" + act.id;
+  const slot = crPicSlot(pic.id);
   await crImgSend({
     kind: "charSlot", charId: char.id, slot: slot, uuid: "cr-" + char.id.slice(0, 8) + "-" + slot + "-" + Date.now(),
-    prompt: crCountTags([crKind(char)]).concat(["solo", "full body", (act.prompt || act.name || "standing").trim(), "simple background"]).join(", "),
+    prompt: crCountTags([crKind(char)]).concat(["solo", "full body", (pic.prompt || pic.name || "standing").trim(), "simple background"]).join(", "),
     extraBaseVisuals: base.base, extraBaseUC: base.uc,
     characters: [{ name: char.name || "character", visuals: assembled.visuals, uc: assembled.uc }],
     settings: crImgReqSettings(crCompileImgFields())
   });
-  try{ await api.v1.ui.toast("Generating " + (act.name || "the activity") + "…", { type: "info", autoClose: 2500 }); }
+  try{ await api.v1.ui.toast("Generating " + (pic.name || "the picture") + "…", { type: "info", autoClose: 2500 }); }
   catch (e){}
 }
 
-async function crHomeGenerateRoom(scenario: Scenario, v: CrSetVariant) : Promise<void>
+// The room's Home picture, or with an atmosphere line its alternative picture for while that line is on.
+async function crHomeGenerateRoom(scenario: Scenario, v: CrSetVariant, alt?: CrAtmosLine) : Promise<void>
 {
   if (!crBridge.ready){
     try{ await api.v1.ui.toast("The bridge is not connected, so nothing can generate.", { type: "warning" }); }
@@ -22200,10 +22490,10 @@ async function crHomeGenerateRoom(scenario: Scenario, v: CrSetVariant) : Promise
     return;
   }
   const scene: CrSceneCard = (scenario.cr && scenario.cr.img) ? scenario.cr.img : {};
-  const slot = "h-" + v.id;
+  const slot = alt ? ("h-" + v.id + "-" + alt.id) : ("h-" + v.id);
   await crImgSend({
     kind: "charSlot", charId: scenario.id, slot: slot, uuid: "cr-" + scenario.id.slice(0, 8) + "-" + slot + "-" + Date.now(),
-    prompt: [what, "no humans, scenery, from above, indoors"].join(", "),
+    prompt: [what, alt ? (alt.text || "").trim() : "", "no humans, scenery, from above, indoors"].filter(Boolean).join(", "),
     extraBaseVisuals: (scene.basePrompt || "").trim(),
     extraBaseUC: [(scene.baseUC || "").trim(), (v.uc || "").trim()].filter(Boolean).join(", "),
     characters: [],
@@ -22240,7 +22530,7 @@ function CrHomeFigure(props: { k: string; charId: string; slot: string; name: st
   );
 }
 
-function CrHomeLayer(props: { scenarioId: string; layer: CrRoomLayer; selected: boolean }) : any
+function CrHomeLayer(props: { scenarioId: string; layer: CrRoomLayer; selected: boolean; dim?: boolean }) : any
 {
   const l = props.layer;
   const style: any = l.fill
@@ -22248,7 +22538,7 @@ function CrHomeLayer(props: { scenarioId: string; layer: CrRoomLayer; selected: 
     : { position: "absolute", left: String(l.x * 100) + "%", top: String(l.y * 100) + "%",
         width: String(l.scale * 100) + "%", aspectRatio: "var(--ce-img-ar, 1 / 1)", transform: "translate(-50%, -50%)" };
   style.zIndex = l.above ? "6" : "2";
-  style.opacity = String(l.opacity);
+  style.opacity = String(props.dim ? l.opacity * 0.35 : l.opacity);
   style.mixBlendMode = l.blend || "normal";
   style.pointerEvents = "none";
   style.outline = props.selected ? ("2px dashed " + CR_ACCENT) : "none";
@@ -22288,21 +22578,21 @@ function CrHomeSlider(props: { label: string; k: string; field: string; min: num
   );
 }
 
+
 function CrHomeSurface(props: { mobile: boolean }) : any
 {
   const contact = crLiveContact();
   const scenario = crLiveScenario();
   if (!contact || !scenario){
-    return h(CrEmpty, { text: "Pair a Contact and a Scenario on the Chat tab — Home's rooms are the Scenario's." });
+    return h(CrEmpty, { text: "Pair a Contact and a Scenario on the Chat tab — Home's rooms are the Scenario's locations." });
   }
   const rooms = crHomeRoomsSet(scenario);
   if (!rooms || !rooms.variants.length){
     return h(CrSection, {
       title: "Home",
-      note: "Home's rooms are a set on the Scenario: on its Brains tab add a set (say Rooms) with a version per room, "
-        + "turn Home rooms on, and give each room a Home picture."
+      note: "Home's rooms are the Scenario's locations: open its Locations tab, add a place per room and give each a Home picture."
     }, h("div", { style: { marginTop: CR_S_3 } },
-      h(CrButton, { text: "Open " + (scenario.name || "the Scenario"), icon: "", onClick: () => crOpenCardFromChat("scenario", scenario.id, "brains") })));
+      h(CrButton, { text: "Open " + (scenario.name || "the Scenario") + "'s Locations", icon: "", onClick: () => crOpenCardFromChat("scenario", scenario.id, "locations") })));
   }
   const cast = crChatCast().filter((c) => !crIsUserCard(c)) as Character[];
   const places: Record<string, CrHomePlace> = {};
@@ -22315,28 +22605,37 @@ function CrHomeSurface(props: { mobile: boolean }) : any
   const roomOf = (id: string) => rooms.variants.find((v) => v.id === id);
   const roomName = (id: string) => { const v = roomOf(id); return (v && v.name) ? v.name : "a room"; };
   const arrange = crHomeUi.arrange;
-  const viewRoom = roomOf(view);
-  const layers: CrRoomLayer[] = (viewRoom && viewRoom.layers) ? viewRoom.layers : [];
+  const viewRoom = roomOf(view) as CrSetVariant;
+  const layers: CrRoomLayer[] = viewRoom.layers || [];
+  const picSlot = (rec: CrLineHome | undefined) => (rec && rec.pic) ? crPicSlot(rec.pic) : CR_SLOT_AVATAR;
 
   type Fig = { k: string; charId: string; slot: string; name: string; x: number; y: number; scale: number };
   const figs: Fig[] = [];
   if (arrange){
-    cast.forEach((c) => crActivitiesOf(c).forEach((a) => {
-      if (a.room === view){
-        figs.push({ k: crHomeKey(c.id, a.id), charId: c.id, slot: "a-" + a.id, name: c.name, x: a.x, y: a.y, scale: a.scale });
+    cast.forEach((c) => {
+      const lh = crLineHomeOf(c);
+      Object.keys(lh).forEach((lineId) => {
+        const rec = lh[lineId][scenario.id];
+        if (rec && rec.room === view){
+          figs.push({ k: crHomeKey(c.id, lineId), charId: c.id, slot: picSlot(rec), name: c.name, x: rec.x, y: rec.y, scale: rec.scale });
+        }
+      });
+      const idle = crHomeIdleOf(c)[scenario.id];
+      if (idle && idle.room === view){
+        figs.push({ k: crHomeKey(c.id, CR_HOME_IDLE), charId: c.id, slot: picSlot(idle), name: c.name, x: idle.x, y: idle.y, scale: idle.scale });
       }
-    }));
+    });
   }
   else {
     const here = cast.filter((c) => places[c.id].room === view);
     here.forEach((c, i) => {
-      const a = places[c.id].act;
-      figs.push(a
-        ? { k: crHomeKey(c.id, a.id), charId: c.id, slot: "a-" + a.id, name: c.name, x: a.x, y: a.y, scale: a.scale }
+      const pl = places[c.id];
+      figs.push(pl.spot
+        ? { k: crHomeKey(c.id, pl.line), charId: c.id, slot: picSlot(pl.spot), name: c.name, x: pl.spot.x, y: pl.spot.y, scale: pl.spot.scale }
         : { k: c.id + "|", charId: c.id, slot: CR_SLOT_AVATAR, name: c.name, x: (i + 0.5) / here.length * 0.8 + 0.1, y: 0.78, scale: 0.16 });
     });
   }
-  const selAct = arrange ? crHomeFind(crHomeUi.sel) : undefined;
+  const selLine = arrange ? crHomeFind(crHomeUi.sel) : undefined;
   const selLayer = arrange ? crHomeFindLayer(crHomeUi.sel) : undefined;
 
   const cells: any[] = [];
@@ -22371,10 +22670,13 @@ function CrHomeSurface(props: { mobile: boolean }) : any
     style: { position: "relative", width: "100%", aspectRatio: "var(--ce-img-ar, 1 / 1)" }
   },
     h("div", { style: { position: "absolute", inset: "0", display: "grid", placeItems: "center", color: CR_DIM, fontSize: CR_T_SM, padding: CR_S_3, textAlign: "center" } },
-      "No Home picture for " + roomName(view) + " yet — add one on the Scenario's Brains tab."),
-    crImgAnchor(scenario.id, "h-" + view, "fit=cover,collapse=1",
+      "No Home picture for " + roomName(view) + " yet — add one on the Scenario's Locations tab."),
+    crImgAnchor(scenario.id, crRoomPicSlot(viewRoom), "fit=cover,collapse=1",
       { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block", zIndex: "1" }),
-    layers.map((l) => h(CrHomeLayer, { key: l.id, scenarioId: scenario.id, layer: l, selected: arrange && crHomeUi.sel === crHomeLayerKey(view, l.id) })),
+    layers.filter((l) => arrange || crLayerShown(viewRoom, l)).map((l) => h(CrHomeLayer, {
+      key: l.id, scenarioId: scenario.id, layer: l, dim: arrange && !crLayerShown(viewRoom, l),
+      selected: arrange && crHomeUi.sel === crHomeLayerKey(view, l.id)
+    })),
     cells,
     figs.map((f) => h(CrHomeFigure, {
       key: f.k, k: f.k, charId: f.charId, slot: f.slot, name: f.name, x: f.x, y: f.y, scale: f.scale,
@@ -22404,9 +22706,11 @@ function CrHomeSurface(props: { mobile: boolean }) : any
     }));
 
   const here = who(view);
+  const atmos = crAtmosLive(viewRoom).map((a) => (a.text || "").trim()).filter(Boolean);
   const status = (here.length ? ("In " + roomName(view) + ": " + here.join(", ") + ".") : ("Nobody is in " + roomName(view) + "."))
     + (view !== contactRoom ? "  " + (contact.name || "The Contact") + " is in " + roomName(contactRoom) + "." : "")
-    + (view !== userRoom ? "  You are in " + roomName(userRoom) + "." : "");
+    + (view !== userRoom ? "  You are in " + roomName(userRoom) + "." : "")
+    + (atmos.length ? "  " + atmos.join(" ") : "");
 
   const save = (k: string) => { const t = crHomeTarget(k); if (t){ t.save().catch(() => {}); } };
   const k = crHomeUi.sel;
@@ -22415,53 +22719,106 @@ function CrHomeSurface(props: { mobile: boolean }) : any
     h(CrHomeSlider, { key: "y", label: "Down", k: k, field: "y", min: 0, max: 100, per: 100 }),
     h(CrHomeSlider, { key: "s", label: "Size", k: k, field: "scale", min: 3, max: 100, per: 100 })
   ];
-  const panel = selAct ? h(CrSection, {
-    title: (selAct.char.name || "Unnamed") + "  ·  " + (selAct.act.name || "Activity"),
-    note: "Tap a square to move it there, drag it with a mouse, or slide. Its picture's centre sits on the point. "
-      + "An uploaded animated WebP, GIF, PNG or SVG keeps moving; a transparent one shows the room through."
-  }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
-    h(CrField, { label: "Activity" },
-      h(CrTextInput, { value: selAct.act.name, placeholder: "Sleeping", onSet: (v: string) => { const f = crHomeFind(k); if (f){ f.act.name = v.slice(0, 80); save(k); } } })),
-    h(CrField, { label: "Picture prompt", hint: "For Generate: what they are doing, e.g. sleeping, lying in bed, from above." },
-      h(CrTextInput, { value: selAct.act.prompt || "", placeholder: "reading, sitting on sofa, from above", onSet: (v: string) => { const f = crHomeFind(k); if (f){ f.act.prompt = v.slice(0, 400) || undefined; save(k); } } })),
-    placeSliders,
-    h(CrChoice, {
-      label: "Idle here", hint: "On: where they are in this room when no schedule event names an activity.",
-      options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }], active: selAct.act.idle ? "on" : "off",
-      onPick: (id: string) => { const f = crHomeFind(k); if (f){ f.act.idle = id === "on" ? true : undefined; save(k); } }
-    }),
-    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
-      h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(selAct.char.id, "a-" + selAct.act.id).catch(() => {}); } }),
-      h(CrButton, { text: "Generate picture", icon: "", onClick: () => { crHomeGenerateActivity(selAct.char, selAct.act).catch(() => {}); } }),
-      h(CrButton, { text: "Remove", icon: "", onClick: () => { crHomeRemoveActivity(k).catch(() => {}); } }))
-  )) : (selLayer ? h(CrSection, {
-    title: roomName(view) + "  ·  " + (selLayer.layer.name || "Layer"),
-    note: "A picture over or under the room's people — light, weather, a window's glow. Upload a transparent or "
-      + "animated WebP, GIF, PNG or SVG; Blend decides how it mixes with what is beneath it."
-  }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
-    h(CrField, { label: "Layer" },
-      h(CrTextInput, { value: selLayer.layer.name, placeholder: "Candlelight", onSet: (v: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.name = v.slice(0, 80); save(k); } } })),
-    h(CrChoice, {
-      label: "Sits", options: [{ id: "above", label: "Over the people" }, { id: "below", label: "Under the people" }],
-      active: selLayer.layer.above ? "above" : "below",
-      onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.above = id === "above"; save(k); } }
-    }),
-    h(CrChoice, {
-      label: "Covers", options: [{ id: "fill", label: "The whole room" }, { id: "placed", label: "One spot" }],
-      active: selLayer.layer.fill ? "fill" : "placed",
-      onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.fill = id === "fill"; save(k); } }
-    }),
-    h(CrChoice, {
-      label: "Blend", options: CR_LAYER_BLENDS.map((b) => ({ id: b, label: b })),
-      active: selLayer.layer.blend || "normal",
-      onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.blend = id; save(k); } }
-    }),
-    h(CrHomeSlider, { label: "Opacity", k: k, field: "opacity", min: 0, max: 100, per: 100 }),
-    selLayer.layer.fill ? null : placeSliders,
-    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
-      h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(selLayer.scenario.id, "l-" + selLayer.layer.id).catch(() => {}); } }),
-      h(CrButton, { text: "Remove", icon: "", onClick: () => { crHomeRemoveLayer(k).catch(() => {}); } }))
-  )) : null);
+
+  let panel: any = null;
+  if (selLine){
+    const pics = crPicsOf(selLine.char);
+    const pic = pics.find((p) => p.id === selLine.rec.pic);
+    const updPic = (patch: any) => {
+      const f = crHomeFind(k);
+      const list = f ? crPicsOf(f.char) : [];
+      const p = f ? list.find((x) => x.id === f.rec.pic) : undefined;
+      if (f && p){ Object.assign(p, patch); crHomeSaveChar(f.char).catch(() => {}); }
+    };
+    panel = h(CrSection, {
+      title: (selLine.char.name || "Unnamed") + "  ·  " + crLineLabel(selLine.char, selLine.line),
+      note: "Tap a square to move it there, drag it with a mouse, or slide. The picture's centre sits on the point. "
+        + "Its time and words are on the Contact's Schedule tab. An animated WebP, GIF, PNG or SVG keeps moving."
+    }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+      h(CrChoice, {
+        label: "Picture", hint: "One of " + (selLine.char.name || "their") + "'s pictures — lines can share one.",
+        options: [{ id: "", label: "Their avatar" }].concat(pics.map((p) => ({ id: p.id, label: p.name || "Picture" }))),
+        active: selLine.rec.pic || "",
+        onPick: (id: string) => { const f = crHomeFind(k); if (f){ f.rec.pic = id || undefined; crHomeSaveChar(f.char).catch(() => {}); } }
+      }),
+      h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+        h(CrButton, { text: "New picture", icon: "", onClick: () => {
+          const label = selLine.line === CR_HOME_IDLE ? "At ease" : ((crScheduleFind(selLine.char, selLine.line) || { evt: { text: "" } }).evt.text || "Picture");
+          crHomeNewPic(selLine.char, k, label).catch(() => {});
+        } })),
+      pic ? h(CrField, { label: "Picture name" },
+        h(CrTextInput, { value: pic.name, placeholder: "Sleeping", onSet: (v: string) => updPic({ name: v.slice(0, 80) }) })) : null,
+      pic ? h(CrField, { label: "Picture prompt", hint: "For Generate: what they are doing, e.g. sleeping, lying in bed, from above." },
+        h(CrTextInput, { value: pic.prompt || "", placeholder: "reading, sitting on sofa, from above", onSet: (v: string) => updPic({ prompt: v.slice(0, 400) || undefined }) })) : null,
+      pic ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+        h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(selLine.char.id, crPicSlot(pic.id)).catch(() => {}); } }),
+        h(CrButton, { text: "Generate picture", icon: "", onClick: () => { crHomeGeneratePic(selLine.char, pic).catch(() => {}); } })) : null,
+      placeSliders,
+      h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+        h(CrButton, { text: "Take out of " + roomName(view), icon: "", onClick: () => { crHomeUnplace(selLine.char, selLine.line, scenario.id).catch(() => {}); } }))
+    ));
+  }
+  else if (selLayer){
+    panel = h(CrSection, {
+      title: roomName(view) + "  ·  " + (selLayer.layer.name || "Layer"),
+      note: "A picture over or under the room's people — light, weather, a window's glow. Upload a transparent or "
+        + "animated WebP, GIF, PNG or SVG; Blend decides how it mixes with what is beneath it. The place's atmosphere "
+        + "lines (Locations tab) can show or hide it by the clock."
+    }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+      h(CrField, { label: "Layer" },
+        h(CrTextInput, { value: selLayer.layer.name, placeholder: "Candlelight", onSet: (v: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.name = v.slice(0, 80); save(k); } } })),
+      h(CrChoice, {
+        label: "Shown", hint: "When no atmosphere line on now says otherwise.",
+        options: [{ id: "on", label: "Shown" }, { id: "off", label: "Hidden" }],
+        active: selLayer.layer.shown === false ? "off" : "on",
+        onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.shown = id === "on"; save(k); } }
+      }),
+      h(CrChoice, {
+        label: "Sits", options: [{ id: "above", label: "Over the people" }, { id: "below", label: "Under the people" }],
+        active: selLayer.layer.above ? "above" : "below",
+        onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.above = id === "above"; save(k); } }
+      }),
+      h(CrChoice, {
+        label: "Covers", options: [{ id: "fill", label: "The whole room" }, { id: "placed", label: "One spot" }],
+        active: selLayer.layer.fill ? "fill" : "placed",
+        onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.fill = id === "fill"; save(k); } }
+      }),
+      h(CrChoice, {
+        label: "Blend", options: CR_LAYER_BLENDS.map((b) => ({ id: b, label: b })),
+        active: selLayer.layer.blend || "normal",
+        onPick: (id: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.blend = id; save(k); } }
+      }),
+      h(CrHomeSlider, { label: "Opacity", k: k, field: "opacity", min: 0, max: 100, per: 100 }),
+      selLayer.layer.fill ? null : placeSliders,
+      h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+        h(CrButton, { text: "Upload picture", icon: "", onClick: () => { crSlotUpload(selLayer.scenario.id, "l-" + selLayer.layer.id).catch(() => {}); } }),
+        h(CrButton, { text: "Remove", icon: "", onClick: () => { crHomeRemoveLayer(k).catch(() => {}); } }))
+    ));
+  }
+
+  // Lines and nothing-on places a cast member could be given in this room.
+  const placeRows: any[] = [];
+  if (arrange){
+    cast.forEach((c) => {
+      const lh = crLineHomeOf(c);
+      const sched = crScheduleOf(c);
+      const options: { id: string; label: string }[] = [];
+      DAY_LIST.forEach((d) => sched[d].forEach((e) => {
+        const rec = lh[e.id] ? lh[e.id][scenario.id] : undefined;
+        if (!rec || rec.room !== view){
+          options.push({ id: e.id, label: crLineLabel(c, e.id) });
+        }
+      }));
+      const idle = crHomeIdleOf(c)[scenario.id];
+      if (!idle || idle.room !== view){
+        options.unshift({ id: CR_HOME_IDLE, label: "When nothing is on" });
+      }
+      placeRows.push(h(CrField, { key: c.id, label: "Put " + (c.name || "Unnamed") + " here for" },
+        h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_1 } },
+          options.map((o) => h(CrButton, { key: o.id, text: o.label, icon: "",
+            onClick: () => { crHomePlaceLine(c, o.id, scenario.id, view).catch(() => {}); } })))));
+    });
+  }
 
   return h("div", { class: "cr-home", style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
     h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
@@ -22472,7 +22829,7 @@ function CrHomeSurface(props: { mobile: boolean }) : any
       view !== userRoom ? h(CrButton, { text: "Drop in", icon: "",
         onClick: () => { crHomeUi.look = ""; crPickVariant(rooms.id, view).catch(() => {}); } }) : null,
       (crHomeUi.look || pinned) ? h(CrButton, { text: "Follow " + (contact.name || "the Contact"), icon: "",
-        onClick: () => { crHomeUi.look = ""; if (pinned){ crUnpinVariant(rooms.id).catch(() => {}); } else { crTouch(); } } }) : null,
+        onClick: () => { crHomeUi.look = ""; if (pinned){ crUnpinVariant(rooms.id).catch(() => {}); } else { crTouch(); } } }) : null
     ),
     crHomeOn ? null : h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
       "While Home is off the chat works as before. On, each speaker is told only the room they are in and who is there with them."),
@@ -22482,18 +22839,297 @@ function CrHomeSurface(props: { mobile: boolean }) : any
         ? (arrange ? "  Pinch or scroll to zoom; double-tap to reset." : "  Pinch or scroll to zoom, drag to look around, double-tap to reset.")
         : "  Update the bridge to 3.0.40 to zoom and pan.")),
     box,
-    arrange ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
-      h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "Add an activity in " + roomName(view) + " for"),
-      cast.map((c) => h(CrButton, { key: c.id, text: c.name || "Unnamed", icon: "", onClick: () => { crHomeAddActivity(c, view).catch(() => {}); } }))
-    ) : null,
+    arrange ? h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2 } }, placeRows) : null,
     arrange ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
       h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "Layers in " + roomName(view)),
-      layers.map((l) => h(CrButton, { key: l.id, text: l.name || "Layer", icon: "", primary: crHomeUi.sel === crHomeLayerKey(view, l.id),
+      layers.map((l) => h(CrButton, { key: l.id, text: (l.name || "Layer") + (crLayerShown(viewRoom, l) ? "" : " (hidden now)"), icon: "", primary: crHomeUi.sel === crHomeLayerKey(view, l.id),
         onClick: () => { crHomeUi.sel = crHomeLayerKey(view, l.id); crTouch(); } })),
       h(CrButton, { text: "Add a layer", icon: "", onClick: () => { crHomeAddLayer(scenario, view).catch(() => {}); } })
     ) : null,
     panel
   );
+}
+
+// [CR-HOME] Scenario > Locations (D-123): the Scenario's places — each a version of its Locations set — with their
+// brain, image prompts, Stage and Home pictures, layers, and an atmosphere schedule on the chat clock.
+const crLocOpen: Record<string, boolean> = {};
+
+function CrLocationsTab(props: { scenario: Scenario; mobile: boolean }) : any
+{
+  const scenario = props.scenario;
+  const sets: CrBrainSet[] = JSON.parse(JSON.stringify(crCardSets(scenario)));
+  const commit = () => { crSetCardSets(scenario, "scenario", sets).catch(() => {}); };
+  const si = sets.findIndex((s) => s.rooms);
+  const rowStyle: any = {
+    border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
+    padding: CR_S_4, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3
+  };
+  if (si < 0){
+    return h(CrSection, {
+      title: "Locations",
+      note: "The places of this Scenario: each one a brain the chat sends while you are there, a Stage and a Home picture, "
+        + "layers, and an atmosphere schedule. Make them here, or turn an existing set into them."
+    }, h("div", { style: { marginTop: CR_S_3, display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+      h(CrButton, { text: "Make locations", primary: true, icon: "", disabled: sets.length >= CR_SET_MAX, onClick: () => {
+        sets.push({ id: crShortId("s"), name: "Location", rooms: true, variants: [{ id: crShortId("v"), name: "", content: "" }] });
+        commit();
+      } }),
+      sets.map((s, i) => h(CrButton, { key: s.id, text: "Use " + (s.name || "Set") + " as locations", icon: "",
+        onClick: () => { sets[i].rooms = true; commit(); } }))));
+  }
+  const set = sets[si];
+  const active = crSetResolve(crCardSets(scenario)[si], scenario.id);
+  const dayOpts = DAY_LIST.map((d) => ({ id: d, label: d === "Daily" ? "Daily" : d.slice(0, 3) }));
+  return h("div", { class: "cr-locations", style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_4 } },
+    h(CrSection, {
+      title: set.name || "Locations",
+      note: "The chat's place is " + (active.v ? (active.v.name || "unnamed") : "none") + " (" + crSetWhyText(active) + "). "
+        + "A Contact's schedule line can name the place it happens in; Chat > Brains pins one by hand. "
+        + "An atmosphere line, while on, adds its words to the place's brain, shows or hides layers, and can swap the Home picture."
+    }, h("div", { style: { marginTop: CR_S_3 } },
+      h(CrTextInput, { value: set.name, placeholder: "Location", onSet: (v: string) => { set.name = v.slice(0, 80); commit(); } }))),
+    set.variants.map((v, vi) => {
+      const open = !!crLocOpen[v.id];
+      const lays = v.layers || [];
+      return h("div", { key: v.id, style: rowStyle },
+        h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center" } },
+          h("div", {
+            style: { position: "relative", width: "44px", height: "44px", flex: "0 0 auto", borderRadius: CR_RADIUS_S,
+                     overflow: "hidden", background: CR_FILL2, border: CR_LINE_W + " solid " + CR_LINE }
+          }, crImgAnchor(scenario.id, "h-" + v.id, "fit=cover,collapse=1",
+               { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block" })),
+          h("div", {
+            onClick: () => { crLocOpen[v.id] = !open; crTouch(); },
+            style: { flex: "1 1 auto", minWidth: "0", cursor: "pointer", color: CR_HEAD, fontWeight: "600",
+                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
+          }, (open ? "▾ " : "▸ ") + (v.name || "Unnamed place")
+            + (crAtmosLive(v).length ? "  ·  " + crAtmosLive(v).map((a) => a.text || "atmosphere").join(", ") : "")),
+          (active.v && active.v.id === v.id) ? h(CrPill, { text: "the chat's", tone: "accent" }) : null
+        ),
+        open ? h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+          h(CrTextInput, { value: v.name, placeholder: "Kitchen", onSet: (x: string) => { v.name = x.slice(0, 80); commit(); } }),
+          h(CrTextArea, { value: v.content, placeholder: "What the model should know while the chat is here.", rows: props.mobile ? 4 : 3,
+            onSet: (x: string) => { v.content = x.slice(0, 4000); commit(); } }),
+          h(CrField, { label: "Image prompt", hint: "Draws this place; joins every picture while the chat is here." },
+            h(CrTextInput, { value: v.prompt || "", placeholder: "small kitchen, warm light, wooden table",
+              onSet: (x: string) => { v.prompt = x.slice(0, 600) || undefined; commit(); } })),
+          h(CrField, { label: "Image undesired" },
+            h(CrTextInput, { value: v.uc || "", placeholder: "", onSet: (x: string) => { v.uc = x.slice(0, 600) || undefined; commit(); } })),
+          h(CrField, { label: "Stage picture", hint: "Behind the Stage while the chat is here (when this set is the Stage backdrop)." },
+            h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center", marginTop: CR_S_1 } },
+              h(CrVariantThumb, { cardId: scenario.id, v: v, size: 44 }),
+              h(CrButton, { text: "Upload", icon: "", onClick: () => { crSlotUpload(scenario.id, crVariantSlot(v)).catch(() => {}); } }),
+              h(CrButton, { text: "Generate", icon: "", onClick: () => { crGenerateVariantImage(scenario, "scenario", set, v).catch(() => {}); } }))),
+          h(CrField, { label: "Home picture", hint: "Any shape; seen from above works best. Animated WebP, GIF, PNG or SVG keeps moving." },
+            h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_1 } },
+              h(CrButton, { text: "Upload", icon: "", onClick: () => { crSlotUpload(scenario.id, "h-" + v.id).catch(() => {}); } }),
+              h(CrButton, { text: "Generate", icon: "", onClick: () => { crHomeGenerateRoom(scenario, v).catch(() => {}); } }))),
+          h(CrField, { label: "Layers", hint: lays.length ? "Placed and styled in Chat > Home > Arrange." : "None yet — add them in Chat > Home > Arrange." },
+            lays.length ? h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, marginTop: CR_S_1 } },
+              lays.map((l) => (l.name || "Layer") + (l.shown === false ? " (hidden)" : "")).join(", ")) : null),
+          h(CrField, { label: "Atmosphere", hint: "Lines on the chat clock. While one is on: its words join the brain, its layers show or hide, and it can have its own Home picture." },
+            h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3, marginTop: CR_S_1 } },
+              (v.atmos || []).map((a, ai) => {
+                const put = (patch: any) => { Object.assign(v.atmos![ai], patch); commit(); };
+                const stepRow = (label: string, key: string, value: number) => h("div", { style: { display: "flex", gap: CR_S_2, alignItems: "center", flexWrap: "wrap" } },
+                  h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, minWidth: "44px" } }, label),
+                  h(CrButton, { text: "−1h", icon: "", onClick: () => put({ [key]: crEvtStep(value, -60) }) }),
+                  h(CrButton, { text: "−30m", icon: "", onClick: () => put({ [key]: crEvtStep(value, -30) }) }),
+                  h("div", { style: { minWidth: "54px", textAlign: "center", color: CR_HEAD, fontWeight: "600" } }, crFmtHM(value)),
+                  h(CrButton, { text: "+30m", icon: "", onClick: () => put({ [key]: crEvtStep(value, 30) }) }),
+                  h(CrButton, { text: "+1h", icon: "", onClick: () => put({ [key]: crEvtStep(value, 60) }) }));
+                return h("div", { key: a.id, style: Object.assign({}, rowStyle, { padding: CR_S_3 }) },
+                  h(CrTextInput, { value: a.text, placeholder: "The lamps are lit.", onSet: (x: string) => put({ text: x.slice(0, 400) }) }),
+                  h(CrChoice, { label: "Day", options: dayOpts, active: a.day, onPick: (id: string) => put({ day: id }) }),
+                  stepRow("From", "start", a.start),
+                  stepRow("Until", "end", a.end),
+                  lays.length ? h(CrField, { label: "Layers while on" },
+                    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_1 } },
+                      lays.map((l) => {
+                        const mode = (a.on || []).indexOf(l.id) >= 0 ? "show" : ((a.off || []).indexOf(l.id) >= 0 ? "hide" : "");
+                        return h(CrButton, { key: l.id, icon: "", primary: !!mode,
+                          text: (l.name || "Layer") + (mode ? ": " + mode : ""),
+                          onClick: () => {
+                            const on = (a.on || []).filter((x) => x !== l.id);
+                            const off = (a.off || []).filter((x) => x !== l.id);
+                            if (mode === ""){ on.push(l.id); }
+                            else if (mode === "show"){ off.push(l.id); }
+                            put({ on: on.length ? on : undefined, off: off.length ? off : undefined });
+                          } });
+                      }))) : null,
+                  h(CrChoice, { label: "Home picture while on", options: [{ id: "off", label: "The place's own" }, { id: "on", label: "Its own picture" }],
+                    active: a.alt ? "on" : "off", onPick: (id: string) => put({ alt: id === "on" ? true : undefined }) }),
+                  a.alt ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+                    h(CrButton, { text: "Upload its picture", icon: "", onClick: () => { crSlotUpload(scenario.id, "h-" + v.id + "-" + a.id).catch(() => {}); } }),
+                    h(CrButton, { text: "Generate its picture", icon: "", onClick: () => { crHomeGenerateRoom(scenario, v, a).catch(() => {}); } })) : null,
+                  h("div", null, h(CrButton, { text: "Remove", icon: "", onClick: () => { v.atmos!.splice(ai, 1); if (!v.atmos!.length){ v.atmos = undefined; } commit(); } })));
+              }),
+              h("div", null, h(CrButton, { text: "Add an atmosphere line", icon: "", disabled: (v.atmos || []).length >= 16, onClick: () => {
+                v.atmos = (v.atmos || []).concat([{ id: crShortId("t"), day: "Daily", start: 1080, end: 1380, text: "" }]);
+                commit();
+              } })))),
+          h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+            (active.v && active.v.id === v.id && active.why === "pinned") ? null
+              : h(CrButton, { text: "Put the chat here", icon: "", onClick: () => { crPickVariant(set.id, v.id).catch(() => {}); } }),
+            h(CrButton, { text: "Remove place", icon: "", onClick: () => { set.variants.splice(vi, 1); commit(); } }))
+        ) : null
+      );
+    }),
+    h("div", null, h(CrButton, { text: "Add a place", icon: "", disabled: set.variants.length >= CR_VARIANT_MAX, onClick: () => {
+      const nv: CrSetVariant = { id: crShortId("v"), name: "", content: "" };
+      set.variants.push(nv);
+      crLocOpen[nv.id] = true;
+      commit();
+    } }))
+  );
+}
+
+// [CR-HOME] Schedule > Routines (D-123): whole schedules kept on the Contact to swap in, and as a file. A line
+// keeps its id, so its Home parts and set links come back with it.
+let crRoutineName = "";
+
+async function crRoutineSave(char: Character) : Promise<void>
+{
+  const list = crSchedPresetsOf(char).slice();
+  if (list.length >= 12){
+    try{ await api.v1.ui.toast("That is as many routines as one card keeps.", { type: "warning" }); }
+    catch (e){}
+    return;
+  }
+  list.push({ id: crShortId("r"), name: (crRoutineName || "").trim() || ("Routine " + (list.length + 1)),
+              schedule: JSON.parse(JSON.stringify(crScheduleOf(char))) });
+  crRoutineName = "";
+  const extra: any = char.cr || {};
+  extra.schedPresets = list;
+  char.cr = crSanitizeContactExtra(extra);
+  await crScheduleSave(char);
+}
+
+async function crRoutineLoad(char: Character, id: string) : Promise<void>
+{
+  const r = crSchedPresetsOf(char).find((x) => x.id === id);
+  if (!r){
+    return;
+  }
+  char.schedule = JSON.parse(JSON.stringify(r.schedule));
+  crScheduleOf(char);
+  await crScheduleSave(char);
+  try{ await api.v1.ui.toast("Using " + r.name + " as the schedule.", { type: "info", autoClose: 2500 }); }
+  catch (e){}
+}
+
+async function crRoutineDelete(char: Character, id: string) : Promise<void>
+{
+  const extra: any = char.cr || {};
+  extra.schedPresets = crSchedPresetsOf(char).filter((x) => x.id !== id);
+  char.cr = crSanitizeContactExtra(extra);
+  await crScheduleSave(char);
+}
+
+async function crRoutineExport(char: Character) : Promise<void>
+{
+  const body = { kind: "cr-schedule", version: 1, name: char.name || "", schedule: crScheduleOf(char),
+                 lineHome: crLineHomeOf(char), schedLinks: crSchedLinksOf(char), pics: crPicsOf(char) };
+  try{ await api.v1.file.save((char.name || "contact").replace(/[^A-Za-z0-9 _-]/g, "") + " schedule.json", JSON.stringify(body, null, 2)); }
+  catch (e){ api.v1.error("[CR:sched] could not save the schedule file:", e); }
+}
+
+async function crRoutineImport(char: Character) : Promise<void>
+{
+  let text: any;
+  try{ text = await api.v1.file.prompt({ accept: ".json" }); }
+  catch (e){ return; }
+  if (!text || typeof text !== "string"){
+    return;
+  }
+  let data: any;
+  try{ data = JSON.parse(text); }
+  catch (e){
+    try{ await api.v1.ui.toast("That file is not a schedule.", { type: "warning" }); }
+    catch (e2){}
+    return;
+  }
+  const sched = data && data.kind === "cr-schedule" ? crSanitizeScheduleCopy(data.schedule) : undefined;
+  if (!sched){
+    try{ await api.v1.ui.toast("That file is not a schedule.", { type: "warning" }); }
+    catch (e){}
+    return;
+  }
+  const extra: any = char.cr || {};
+  extra.schedPresets = crSchedPresetsOf(char).concat([{ id: crShortId("r"), name: String(data.name || "Imported") + " (file)", schedule: sched }]).slice(0, 12);
+  extra.lineHome = Object.assign({}, crSanitizeLineHome(data.lineHome) || {}, crLineHomeOf(char));
+  extra.schedLinks = Object.assign({}, crSanitizeSchedLinks(data.schedLinks) || {}, crSchedLinksOf(char));
+  const have = crPicsOf(char);
+  extra.pics = have.concat((crSanitizePics(data.pics) || []).filter((p) => !have.some((x) => x.id === p.id)));
+  char.cr = crSanitizeContactExtra(extra);
+  await crScheduleSave(char);
+  try{ await api.v1.ui.toast("Added it as a routine — Use it to swap it in.", { type: "info", autoClose: 3000 }); }
+  catch (e){}
+}
+
+function CrRoutinesSection(props: { char: Character }) : any
+{
+  const char = props.char;
+  const list = crSchedPresetsOf(char);
+  return h(CrSection, {
+    title: "Routines",
+    note: "Whole schedules kept on this Contact — a working week, a holiday — to swap in with Use. A line keeps its "
+      + "place, picture and set choices in each Scenario when it comes back. Export takes it to another card or browser."
+  }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+    list.map((r) => h("div", { key: r.id, style: { display: "flex", gap: CR_S_2, alignItems: "center", flexWrap: "wrap" } },
+      h("div", { style: { flex: "1 1 120px", minWidth: "0", color: CR_HEAD } }, r.name),
+      h(CrButton, { text: "Use", icon: "", onClick: () => { crRoutineLoad(char, r.id).catch(() => {}); } }),
+      h(CrButton, { text: "Remove", icon: "", onClick: () => { crRoutineDelete(char, r.id).catch(() => {}); } }))),
+    h("div", { style: { display: "flex", gap: CR_S_2, alignItems: "center", flexWrap: "wrap" } },
+      h("div", { style: { flex: "1 1 160px", minWidth: "0" } },
+        h(CrTextInput, { value: crRoutineName, placeholder: "Name for the current schedule", onSet: (v: string) => { crRoutineName = v.slice(0, 80); crTouch(); } })),
+      h(CrButton, { text: "Keep as a routine", icon: "", onClick: () => { crRoutineSave(char).catch(() => {}); } })),
+    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+      h(CrButton, { text: "Export schedule", icon: "", onClick: () => { crRoutineExport(char).catch(() => {}); } }),
+      h(CrButton, { text: "Import schedule", icon: "", onClick: () => { crRoutineImport(char).catch(() => {}); } }))
+  ));
+}
+
+// [CR-HOME] The event sheet's Home part: in the paired Scenario, which place this line happens in and with which
+// picture; Place it opens Home's Arrange on it.
+function crEventHomeChoice(char: Character, eventId: string) : any
+{
+  const scenario = crLiveScenario();
+  const rooms = crHomeRoomsSet(scenario);
+  if (!scenario || !rooms || !rooms.variants.length){
+    return null;
+  }
+  const rec = crLineHomeOf(char)[eventId] ? crLineHomeOf(char)[eventId][scenario.id] : undefined;
+  const pics = crPicsOf(char);
+  return h(CrField, {
+    label: "In " + (scenario.name || "this Scenario"),
+    hint: "Where this happens in this Scenario's Home; another Scenario keeps its own answer. It also puts the chat's location there while it is on."
+  }, h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, marginTop: CR_S_1 } },
+    h(CrChoice, {
+      options: [{ id: "", label: "Nowhere" }].concat(rooms.variants.map((v) => ({ id: v.id, label: v.name || "Unnamed" }))),
+      active: rec ? rec.room : "",
+      onPick: (id: string) => {
+        if (id){ crHomePlaceLine(char, eventId, scenario.id, id).catch(() => {}); }
+        else { crHomeUnplace(char, eventId, scenario.id).catch(() => {}); }
+      }
+    }),
+    (rec && pics.length) ? h(CrChoice, {
+      label: "Picture",
+      options: [{ id: "", label: "Their avatar" }].concat(pics.map((p) => ({ id: p.id, label: p.name || "Picture" }))),
+      active: rec.pic || "",
+      onPick: (id: string) => {
+        const f = crHomeFind(crHomeKey(char.id, eventId));
+        if (f){ f.rec.pic = id || undefined; crHomeSaveChar(f.char).catch(() => {}); }
+      }
+    }) : null,
+    rec ? h("div", null, h(CrButton, { text: "Place it in Home", icon: "", onClick: () => {
+      crHomeUi.look = rec.room;
+      crHomeUi.arrange = true;
+      crHomeUi.sel = crHomeKey(char.id, eventId);
+      crCloseEventSheet().catch(() => {});
+      crNav({ surface: "chat", chatTab: "home" });
+    } })) : null
+  ));
 }
 
 // ============================================================================
@@ -22777,6 +23413,10 @@ try{
   if (crMigrateOutfits(charList, false)){ await api.v1.storage.set(CHARACTER_LIST_KEY, charList); }
 }
 catch (e){ api.v1.error("[CR:sets] could not move the Contacts' outfits into sets:", e); }
+try{
+  if (crMigrateActivities(charList)){ await api.v1.storage.set(CHARACTER_LIST_KEY, charList); }
+}
+catch (e){ api.v1.error("[CR:home] could not fold the activities into the schedules:", e); }
 
 async function saveCharList()
 {
