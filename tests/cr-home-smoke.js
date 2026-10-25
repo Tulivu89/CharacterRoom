@@ -1,11 +1,12 @@
 // ============================================================================
 // cr-home-smoke.js — Home  [CR-HOME]
 //
-// Pins engine 1.0.14 (D-117, D-118, D-120 to D-123): a Contact's schedule lines carry Home per Scenario (room,
+// Pins engine 1.0.15 (D-117, D-118, D-120 to D-124): a Contact's schedule lines carry Home per Scenario (room,
 // spot, picture), a nothing-on place, the User with the Contact unless dropped in, a speaker told only their own
 // room, nothing changed while Home is off, the Scenario's Locations with layers and atmosphere on the chat clock,
 // Arrange (tap, drag end saves, fresh targets), pictures, routines, the event sheet, the 1.0.13 migration and
-// the sanitizers.
+// the sanitizers; Arrange's line list drawn as the Schedule tab draws lines; needs and actions (drain on the chat
+// clock, effects, set picks, the needs brain, a low need's look, reactions written and sent).
 //   CR_ENGINE_FILE=<engine> node cr-home-smoke.js
 // ============================================================================
 const fs = require('fs');
@@ -117,7 +118,10 @@ async function load(env) {
         'crEventHomeChoice', 'crEventSetChoices', 'crSanitizeContactExtra', 'crSanitizeScenarioExtra', 'crGroupLoad', 'crHomeOn',
         'crScheduleDelete', 'crHomeTarget', 'crHomeAddLayer', 'crHomeFindLayer', 'crLayerShown', 'crRoomPicSlot', 'crAtmosLive',
         'CrLocationsTab', 'crLocOpen', 'crRoutineSave', 'crRoutineLoad', 'crRoutineExport', 'crRoutineImport', 'crScheduleOf',
-        'crLineHomeOf', 'crHomeIdleOf', 'crPicsOf', 'crSchedPresetsOf', 'CrRoutinesSection'];
+        'crLineHomeOf', 'crHomeIdleOf', 'crPicsOf', 'crSchedPresetsOf', 'CrRoutinesSection',
+        'crNeedsCommit', 'crNeedsStarter', 'crNeedsOf', 'crHomeActionsOf', 'crNeedValue', 'crNeedsState', 'crHomeDoAction',
+        'crHomeLog', 'crHomeSetNeedsLine', 'crHomeReact', 'crHomeSendReaction', 'CrNeedsSection', 'crNeedsText', 'crClockNow',
+        'CrScheduleTab', 'crSetActive'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -159,12 +163,17 @@ const OLD = { cardType: 'contact', id: 'c-old', name: 'Vex', gender: 'female', e
         schedActs: { e9: 'aNap' } } };
 const SAM = { cardType: 'user', id: 'u-sam', name: 'Sam', brains: [], brainsConditional: [] };
 const SPEAKER = 'crHomeUi.__speak = (c) => { crGroupBuildChar = c; };';
+// Reactions without a model: the assembled chat, the generation and the write are stood in for.
+const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role: "system", content: "S" }, { role: "user", content: "U" }, { role: "assistant", content: "Garm:" }];'
+  + ' crGroupRunLocal = async (m) => { crHomeUi.__msgs = m; return "Garm: Thanks, that hit the spot."; };'
+  + ' crGroupGenerate = async (id, m) => { crHomeUi.__msgs = m; return "Garm: Thanks, that hit the spot."; };'
+  + ' crGroupWrite = async (t) => { crHomeUi.__wrote = t; }; crGroupDropEmptyOpener = async () => {}; };';
 
 (async () => {
-  const L = await load({ storage: { characterListKey: [KAT, GARM, OLD], userListKey: [SAM], scenarioListKey: [PORT] },
+  const L = await load({ storage: { characterListKey: [KAT, GARM, OLD], userListKey: [SAM], scenarioListKey: [PORT], crSlotIndexKey: { 'c-garm': ['Avatar', 'irritated'] } },
     storyStorage: { chatSettingsKey: { char: KAT, user: SAM, scenario: PORT, intimacy: 'close', style: 'chat', responseLength: 'unspecified' },
                     'cr.group': { v: 1, members: ['c-kat', 'c-garm'], pools: {} } },
-    bridge: { json: '' }, extra: [SPEAKER] });
+    bridge: { json: '' }, extra: [SPEAKER, FAKEGEN] });
   const X = L.X;
   await X.crGroupLoad()();
   const port = () => X.scenarioList()[0];
@@ -225,7 +234,14 @@ const SPEAKER = 'crHomeUi.__speak = (c) => { crGroupBuildChar = c; };';
   X.crHomeUi().look = 'vGar';
   X.crHomeUi().arrange = true;
   txt = strings(X.CrHomeSurface()({ mobile: true }));
-  ok('arrange: each person\'s lines and nothing-on can be put here', txt.indexOf('Put Kat here for') >= 0 && txt.indexOf('Cooking dinner') >= 0 && txt.indexOf('Put Garm here for') >= 0 && txt.indexOf('When nothing is on') >= 0, txt.slice(0, 900));
+  ok('arrange: each person\'s lines fold under one row with a count', txt.indexOf('Put Kat here | 1 line') >= 0 && txt.indexOf('Put Garm here | 1 line  ·  1 here') >= 0 && txt.indexOf('Cooking dinner') < 0, txt.slice(0, 900));
+  X.crHomeUi().open['c-kat'] = true;
+  txt = strings(X.CrHomeSurface()({ mobile: true }));
+  ok('arrange: open, the lines read as the Schedule tab\'s — times, words, where each is now — by day, nothing-on first',
+    /Any time \| When nothing is on \| here \| Every day \| 00:00 – 23:5\d \| Cooking dinner \| in Kitchen/.test(txt), txt.slice(0, 900));
+  const putTree = flat(X.CrHomeSurface()({ mobile: true }));
+  ok('arrange: the rows are the Schedule tab\'s own', putTree.filter((n) => n && n.props && n.props.class === 'cr-line-row').length === 2);
+  X.crHomeUi().open['c-kat'] = false;
   await X.crHomePlaceLine()(garm(), X.crScheduleOf()(garm()).Daily[0].id, 's-port', 'vKit');
   ok('arrange: putting a line in another room moves its Home part, keeping its spot', X.crLineHomeOf()(garm()).e2['s-port'].room === 'vKit' && X.crLineHomeOf()(garm()).e2['s-port'].x === 0.7 && X.crHomeUi().sel === 'c-garm|e2');
   X.crHomeUi().look = 'vKit';
@@ -302,6 +318,50 @@ const SPEAKER = 'crHomeUi.__speak = (c) => { crGroupBuildChar = c; };';
   txt = tree.filter((x) => typeof x === 'string').join(' | ');
   ok('arrange: a hidden layer is listed as hidden now', txt.indexOf('Candles (hidden now)') >= 0, txt.slice(0, 600));
 
+  // ---- needs and actions (1.0.15, D-124)
+  txt = strings(X.CrNeedsSection()({ char: garm() }));
+  ok('needs: an empty Contact is offered the usual four', txt.indexOf('Start with Hunger, Energy, Fun and Company') >= 0, txt.slice(0, 300));
+  const kitN = X.crNeedsStarter()();
+  kitN.actions[0].set = { setId: 'sMood', variantId: 'vRain' };
+  await X.crNeedsCommit()(garm(), kitN.needs, kitN.actions);
+  const gStored = (await L.storage.get('characterListKey')).find((c) => c.id === 'c-garm').cr;
+  ok('needs: stored on the card', gStored.needs.length === 4 && gStored.homeActions.length === 4 && gStored.homeActions[0].set.variantId === 'vRain');
+  const hunger = () => X.crNeedsOf()(garm())[0];
+  ok('needs: full until the story first sets them', X.crNeedValue()('c-garm', hunger()) === 100);
+  X.crNeedsState()['c-garm'] = { hunger: { v: 50, at: X.crClockNow()() - 5 * 3600000 } };
+  ok('needs: drain by the hour on the chat clock', Math.round(X.crNeedValue()('c-garm', hunger())) === 20);
+  ok('needs: the low ones as one line', X.crNeedsText()(garm()) === 'Garm: Hunger 20/100 — running low.', X.crNeedsText()(garm()));
+  ok('needs brain: off unless asked for — the card goes as it is', X.crBrainView()(garm()) === garm());
+  await X.crHomeSetNeedsLine()(true);
+  let nb = (X.crBrainView()(garm()).brains || []).find((x) => x.name === 'Needs');
+  ok('needs brain: on, a low need joins the speaker\'s brains', nb && nb.content === 'Garm: Hunger 20/100 — running low.', nb);
+  ok('needs brain: the switch keeps Home on beside it', JSON.stringify(await X.story.get('cr.home')) === '{"on":true,"needsLine":true}');
+  ok('needs brain: a Scenario carries none', !(X.crBrainView()(port()).brains || []).some((x) => x.name === 'Needs'));
+  X.crHomeUi().arrange = false;
+  X.crHomeUi().look = X.crHomePlace()(garm(), rooms(), 's-port').room;
+  const careTree = flat(X.CrHomeSurface()({ mobile: true }));
+  txt = careTree.filter((x) => typeof x === 'string').join(' | ');
+  ok('care: meters, levels and actions on Home', txt.indexOf('Garm  ·  in ') >= 0 && txt.indexOf('Hunger | 20/100') >= 0 && txt.indexOf('Feed') >= 0 && txt.indexOf('Needs go to the chat') >= 0, txt.slice(0, 900));
+  ok('care: a low need puts its emotion on a figure with no picture of its own',
+    careTree.some((n) => n && n.props && String(n.props['data-ce-img'] || '').indexOf('c-garm|irritated') === 0));
+  await X.crHomeDoAction()(garm(), 'feed');
+  const lastLog = () => X.crHomeLog()[X.crHomeLog().length - 1];
+  ok('action: effects add from where the need stands, logged on the chat clock', Math.round(X.crNeedValue()('c-garm', hunger())) === 60 && lastLog().action === 'Feed' && lastLog().whoId === 'c-garm');
+  ok('action: its set pick is chosen for the chat', X.crSetActive().sMood === 'vRain');
+  ok('action: needs and the log are the story\'s', Math.round((await X.story.get('cr.needs'))['c-garm'].hunger.v) === 60 && (await X.story.get('cr.homeLog')).items.length === 1);
+  await X.crHomeDoAction()(garm(), 'play');
+  ok('action: a negative effect takes away', Math.round(X.crNeedValue()('c-garm', X.crNeedsOf()(garm())[1])) === 90);
+  X.crHomeUi().__fake();
+  const feedId = X.crHomeLog()[0].id;
+  await X.crHomeReact()(feedId);
+  const msgs = X.crHomeUi().__msgs || [];
+  ok('reaction: the action\'s line goes in as one system line before the reply', msgs.length === 4 && msgs[2].role === 'system' && msgs[2].content === '[ Home: Sam brings Garm something to eat. ]', msgs);
+  ok('reaction: kept on Home until sent', X.crHomeLog()[0].text.indexOf('Thanks, that hit the spot.') >= 0 && X.crHomeLog()[0].sent === false, X.crHomeLog()[0]);
+  await X.crHomeSendReaction()(feedId);
+  ok('reaction: Send writes it into the story once', X.crHomeUi().__wrote === X.crHomeLog()[0].text && X.crHomeLog()[0].sent === true);
+  txt = strings(X.CrScheduleTab()({ char: garm(), mobile: true }));
+  ok('schedule tab: its lines and the needs editor', txt.indexOf('Digging') >= 0 && txt.indexOf('Needs and actions') >= 0 && txt.indexOf('Drops an hour') >= 0, txt.slice(0, 600));
+
   // ---- sanitizers
   const clean = X.crSanitizeContactExtra()({ lineHome: { e1: { s1: { room: 'vKit', x: 5, y: -1, scale: 0, pic: 'bad id' }, s2: { room: 'no good' } } }, homeIdle: { s1: { room: 'vGar' } },
     pics: [{ id: 'p1', name: 'x' }, { id: 'p1', name: 'dup' }], schedPresets: [{ id: 'r1', name: 'R', schedule: { Daily: [{ id: 'z', startTime: 9999, endTime: 30, text: 't', requiredIntimacy: 'weird' }] } }] });
@@ -313,6 +373,12 @@ const SPEAKER = 'crHomeUi.__speak = (c) => { crGroupBuildChar = c; };';
     layers: [{ id: 'l1', shown: false }] }] }] });
   const at = sc.sets[0].variants[0].atmos;
   ok('data: atmosphere lines clamp to the day and keep good layer ids', at.length === 1 && at[0].day === 'Daily' && at[0].start === 0 && at[0].end === 1439 && JSON.stringify(at[0].on) === '["l1"]' && at[0].alt === true && sc.sets[0].variants[0].layers[0].shown === false, at);
+
+  const nd = X.crSanitizeContactExtra()({ needs: [{ id: 'a', name: 'A', max: 5000, decay: -3, low: 9999, lowEmotion: 'tired' }, { id: 'bad id' }, { id: 'b', lowEmotion: 'grumpy' }],
+    homeActions: [{ id: 'x', name: 'X', effects: { a: 10, b: 0, 'bad id': 5 }, set: { setId: 's1', variantId: 'no good' } }, { id: 'no good' }] });
+  ok('data: needs clamp, bad ids and unknown emotions drop; zero or bad effects and broken set picks drop',
+    nd.needs.length === 2 && nd.needs[0].max === 1000 && nd.needs[0].decay === 0 && nd.needs[0].low === 1000 && nd.needs[0].lowEmotion === 'tired' && !nd.needs[1].lowEmotion
+    && nd.homeActions.length === 1 && JSON.stringify(nd.homeActions[0].effects) === '{"a":10}' && !nd.homeActions[0].set, nd);
 
   console.log('\n' + pass + ' passing, ' + fail + ' failing');
   if (fail) process.exit(1);
