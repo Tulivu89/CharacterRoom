@@ -1,6 +1,6 @@
 # CharacterRoom — Plan & Inventory (CR-PLAN)
 
-**Doc version** 0.86 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
+**Doc version** 0.87 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
 the last three are the random-name tables · **Target artifacts** `characterroom-vX.naiscript`
 (engine, LF) and the **shared bridge** — CE's bridge extended to serve both engines (D-15)
 
@@ -51,6 +51,7 @@ the last three are the random-name tables · **Target artifacts** `characterroom
 | D-25 | **CR 0.0.x ships AnotherRoom's UI under CR names** with the kernel inside. The JSX shell replaces those doors in P4. | Every build is importable and complete; nothing waits on the shell to be usable. |
 | D-21 | **Editor portraits are painted by the bridge** (was O-10). | The mechanism exists live today in CE's STORYIMG path: the engine creates a **node widget** holding a 1px transparent **sentinel text** (`ce-storyimg:<id>`); the bridge finds it with a TreeWalker, re-scans on a debounced MutationObserver, climbs a bounded number of ancestors to the widget's own box, and paints there. CR's avatar uses the same channel with the older CharChat sentinel `ce-chatava:` — the bridge still parses `id\|emotion` and still has `_ccavFindSentinels`, `_ccavContainerFor` and `_ccavSettings`; only `_ccavPaintOne` is gone and is rebuilt on `_ceStoryImgRender`'s pattern. No image bytes cross into the worker. §6.8. |
 | D-22 | **Display options: account default, per-Contact override** (was O-11). | Stored on the Contact card as `display?`; resolved by one function (§6.8). |
+| D-123 | **Home is reorganised around the records cards already have** (supersedes D-120's activities). **A Contact's schedule line carries Home**: per Scenario (`cr.lineHome` event id → Scenario id → room, x, y, size, picture), so one schedule serves every house it is used in; a **nothing-on place** per Scenario (`cr.homeIdle`); **pictures** are a named list on the Contact (`cr.pics`, slot `a-<id>`, shared by lines). A line's place in a Scenario also picks that Scenario's Locations (D-119). The event sheet gains **In <Scenario>** (place, picture, Place it in Home); While this is on leaves the Locations to it. **Schedule > Routines** keeps whole schedules on the card (`cr.schedPresets`) to swap in — a line keeps its id, so its Home parts come back with it — and Export / Import writes or reads a schedule file with its Home parts and pictures. **Scenario > Locations** is the place editor: per place, brain text, image prompts, Stage and Home pictures, layers (now **Shown / Hidden** by default), and an **atmosphere schedule** — lines on the chat clock that add words to the place's brain, show or hide layers, and can swap in their own Home picture (`h-<place>-<line>`). The Brains tab no longer lists the Locations set. 1.0.11–1.0.13 activities migrate once at load. **Built in engine 1.0.14.** | Author's review after 1.0.13 and his go-ahead on (c): the schedule is already the record of where a Contact is and when, so Home hangs off it rather than beside it; a place's look over time belongs to the place. With no atmosphere lines the location brain is unchanged, so parity holds (20/20, mutation 19/19); `cr-home-smoke.js` (43) pins lines, nothing-on, atmosphere, Locations, routines, the event sheet, migration and the sanitizers. |
 | D-122 | **Home zooms by gesture; SVG is a picture type.** The room box carries `data-ce-zoom` and its world `data-ce-zoom-world`; bridge 3.0.40 attaches wheel and pinch zoom (1×–6×, about the pointer), drag to pan (not in Arrange, and never from a figure there, `data-ce-zoom-nopan`), double-click or double-tap to reset, and swallows the click that ends a pan. It acks `zoom`, and Home says when the bridge is too old. Uploads accept SVG and store it as it came (an `<img>` plays its SMIL/CSS animation, never its scripts). **Built in engine 1.0.13, bridge 3.0.40.** | Author: gestures as CE's maps had, not buttons; animated SVG. The script cannot do it: the platform's touch events carry no coordinates and there is no wheel event (jsx-typings L15, L108–111), so the page side does it with no round trip. `bridge/zoom-check.js` drives it in Chromium (7); pinch is a live check. |
 | D-121 | **Home: sliders fixed, zoom, room layers, animated pictures.** Arrange edits a target found afresh by key every time (`crHomeTarget`) and saves 0.5 s after the last change (`crHomeSaveSoon`); each slider also has − and + (one point). **Zoom** 1×–4× widens an inner world inside the room's box, which scrolls — the browser pans, by swipe or scroll. **Layers** on a room version (`layers` on the variant, picture slot `l-<id>` on the Scenario, up to 8): over or under the people, the whole room or one spot, blend (normal, screen, lighten, overlay, soft-light, multiply) and opacity. **Bridge 3.0.39** stores an animated GIF or APNG as it came, as WebP already was, so animated rooms, people and layers keep moving. **Built in engine 1.0.12, bridge 3.0.39.** | Author's live test of 1.0.11: the sliders started to move and snapped back. Cause: the platform delivers a range's `change` as it moves, so every step saved, the save rebuilt the card through its sanitizer, and the next step wrote to the old object the slider's closure still held. Every layer is its own `data-ce-ar-host`, a whole-room one too, or its picture would publish its ratio onto the room's box. `cr-home-smoke.js` 32; bridge check 7. |
 | D-120 | **Home step 2 is built: Chat > Home.** A Scenario set marked **Home rooms** (else its first set) is the house; each version gets a **Home picture** of any shape (slot `h-<id>`, upload or generate from above). A Contact's **activities** (`cr.activities`: name, room, centre x/y and width as fractions, Idle, picture prompt; picture slot `a-<id>`) are made and placed in **Arrange**: tap a square of a 10×10 grid, drag with a mouse, or Across / Down / Size sliders; a drag saves when it ends. The schedule event sheet gains **Activity** (`cr.schedActs`); an event's activity puts them in its room and also picks the rooms set (D-119). Each chat member is placed by their own schedule, else the chat's room (pins aside); the User is with the paired Contact unless the author **drops in** (a pin on the rooms set; **Follow** unpins); **Look** views another room only. **Home is per story, off by default** (`storyStorage` `cr.home`): while off nothing reaches the context; on, a speaker's rooms-set brain is their own room plus one line of who is there (D-118). **Built in engine 1.0.11.** | Author: proceed after step 1 checked. The grid is 10×10 rather than 0.81's 20×20: every cell is a live element with two handlers, and the sliders give the fine placement. With Home off, `crBrainView` is unchanged, so parity holds (20/20, mutation 19/19); `cr-home-smoke.js` (25) pins the places, the drop-in, the per-speaker brain, Arrange and the data. A figure with no activity stands as the card's Avatar along the bottom. |
@@ -1214,7 +1215,7 @@ reads — the harness runs, and a fixture pins one schedule-chosen and one relat
 - Optionally, one system line of state into the chat ("Mira is tired and in the kitchen"), the D-93 dice-line
   precedent — off by default.
 
-#### Reorganisation (0.86 proposal, after the author's review of 1.0.12)
+#### Reorganisation (0.86 proposal, after the author's review of 1.0.12) — **built, engine 1.0.14 (D-123), option (c)**
 
 **The schedule is the base of Home for a Contact.** An activity stops being its own record: a schedule line *is* the
 activity. Each line keeps, beside AnotherRoom's fields (time, day, text, intimacy — untouched for parity and AR
@@ -1241,7 +1242,7 @@ room; an Idle one becomes the Contact's no-line place there; the rest stay as na
 | What | Where | Why |
 |---|---|---|
 | Rooms, their Home pictures | the Scenario (sets, `h-` slots) | travel with the Scenario's export |
-| Activities, anchors, scale, schedule links, relationship rules | the Contact's `cr` bag | travel with the card (0.86: activities fold into schedule lines, see Reorganisation) |
+| Each schedule line's Home part per Scenario, the nothing-on place, pictures, routines, set links, relationship rules | the Contact's `cr` bag | travel with the card; Routines export as a schedule file |
 | Room layers, (0.86) a place's atmosphere schedule | the Scenario, on the place's version | travel with the Scenario |
 | Pins, needs, the away log, last-seen time | the story (`storyStorage`; pins in `historyStorage` as now) | a chat's own state, like the version in use |
 
@@ -1422,6 +1423,8 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ---
 
 ## 10. Changelog
+
+- **0.87** — engine 1.0.14: D-123 (Home reorganised: schedule lines carry Home per Scenario; nothing-on place; pictures; Routines; Scenario > Locations with atmosphere). `cr-home-smoke.js` 43.
 
 - **0.86** — engine 1.0.13, bridge 3.0.40: D-122 (gesture zoom and pan; SVG). §6.12 Reorganisation proposal: schedule lines carry Home; a Scenario Locations tab with an atmosphere schedule and layers; one schedule with per-Scenario Home parts, plus presets.
 
@@ -1632,7 +1635,7 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ## 11. Handoff — next session
 
 **Start here.** Read the engine's frontmatter through CR-INDEX, the bridge's CE-INDEX, and
-§1.1/§5/§9 of this document. Current builds: **engine 1.0.13** (GitHub `Tulivu89/CharacterRoom`, the source of truth, D-105), **bridge 3.0.40** (project files of both CR and CE), **CR Persona Helper 0.0.4** (the repo carries helper scripts 0.2.0).
+§1.1/§5/§9 of this document. Current builds: **engine 1.0.14** (GitHub `Tulivu89/CharacterRoom`, the source of truth, D-105), **bridge 3.0.40** (project files of both CR and CE), **CR Persona Helper 0.0.4** (the repo carries helper scripts 0.2.0).
 **Corrected at v0.57**: this line had said engine 0.0.49 since v0.46, and the plan itself stopped at
 D-73 while the engine reached D-83; D-74–D-83 were backfilled from the CR-INDEX in this revision.
 Smart import adds `cr-import-smoke.js`, Chat navigation adds `cr-chatnav-smoke.js`, folders add `cr-folders-smoke.js`, brain sets add `cr-brains-smoke.js`, Home adds `cr-home-smoke.js`, image v1.2 adds `cr-imgv5-smoke.js` (it runs the review's `cr-scene-v2.test.ts` and `cr-img-chunks.test.ts` inside the engine), group chat adds `cr-group-smoke.js` to the checks run before returning an engine patch, the Games tab adds `cr-rpg-smoke.js`, and bubbles add `cr-bubble-smoke.js`.
@@ -1831,6 +1834,8 @@ dead since v0.1 and it still cost two patches.
    Number Guess still open only from the CR Games panel.
 
 ### 11.4 Live-test items the author has not yet been able to confirm
+
+- **Home reorganised** (1.0.14): your 1.0.13 activities should now be the schedule lines' Home parts (and the Idle one the nothing-on place), with their pictures. Scenario > Locations: open a place, add an atmosphere line for the evening that shows a hidden layer and has its own Home picture; move the chat clock into it — Home's status line shows its words, the layer appears, the picture swaps, and the next reply knows. A schedule line's sheet: In <Scenario> picks the place and picture, Place it in Home opens Arrange on it. Pair the same Contact with a second Scenario and give the same line a different place there. Schedule > Routines: keep the schedule, change it, Use the routine to bring it back with its Home parts; Export and Import it.
 
 - **Gesture zoom and SVG** (1.0.13 + bridge 3.0.40): Global > Report is unaffected; on Home, the hint reads "Pinch or scroll to zoom". Wheel and pinch zoom about the pointer, drag pans (outside Arrange), double-tap or double-click resets; in Arrange, tapping a square and dragging a figure still work while zoomed. Upload an animated SVG as a layer or an activity picture and confirm it plays.
 
