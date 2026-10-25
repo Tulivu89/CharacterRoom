@@ -1333,6 +1333,7 @@ Let her sleep / Wake her (she bites), Scrub her back (bathhouse, close), Read wi
 **Outfits she needs (author, 0.91):** Qipao, Off-duty sweater, a comfy pajama set (nest), an intimate lingerie set
 (close / romantic), a towel or bath robe (bathhouse), market clothes for Out — versions of her Clothes set, linked from
 the schedule lines that need them and from Change her clothes.
+**Card work — in progress at 0.91; working draft in the project as `claude/QIULONG-CARD-WORK.md` (personality draft 1, the examples' coverage map).** The method carried over from the Discord pass: the persona holds only what decides her reactions; body habits and tells live in the example chats, each used at most twice across the card, mapped before they are written.
 **Card work, after the premise.** Persona to ~550 words in the Discord cut's direction, keeping one long-form trigger
 and the quiet-polite anger gear; five examples spread across places (teahouse, workshop, kitchen, hoard, nest or bath)
 and relationship stages, each tell used once, outfit-neutral, varied closers and emotions; one **care** example — fed
