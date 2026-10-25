@@ -1,7 +1,7 @@
 // ============================================================================
 // cr-home-smoke.js — Home, step 2  [CR-HOME]
 //
-// Pins engine 1.0.11 (D-117, D-118, D-120) and 1.0.12 (D-121): where each chat member is (schedule activity, schedule room link,
+// Pins engine 1.0.11 (D-117, D-118, D-120) 1.0.12 (D-121) and 1.0.13 (D-122): where each chat member is (schedule activity, schedule room link,
 // the chat's room), the User with the Contact unless dropped in, the speaker told only their own room and who
 // is there, nothing changed while Home is off, Arrange (tap, drag end saves), activity pictures, the event
 // sheet's Activity, and the sanitizer.
@@ -253,9 +253,17 @@ const SPEAKER = 'crHomeUi.__speak = (c) => { crGroupBuildChar = c; };';
   const bad = X.crSanitizeScenarioExtra()({ sets: [{ id: 'sR', name: 'R', variants: [{ id: 'v1', name: 'a', content: '', layers: [{ id: 'l1', opacity: 7, blend: 'difference', above: false, fill: false, scale: 9 }, { id: 'no good' }] }] }] });
   const bl = bad.sets[0].variants[0].layers;
   ok('layers: the sanitizer clamps and drops unknown blends and bad ids', bl.length === 1 && bl[0].opacity === 1 && bl[0].blend === 'normal' && bl[0].above === false && bl[0].fill === false && bl[0].scale === 1, bl);
-  X.crHomeUi().zoom = 2;
   txt = strings(X.CrHomeSurface()({ mobile: true }));
-  ok('zoom: the readout and the look-around hint', txt.indexOf('2×') >= 0 && txt.indexOf('Scroll or swipe') >= 0);
+  ok('zoom (1.0.13): no buttons; an old bridge is named', txt.indexOf('2×') < 0 && txt.indexOf('Update the bridge to 3.0.40') >= 0);
+  X.crBridge().bridgeZoom = true;
+  const tree = flat(X.CrHomeSurface()({ mobile: true }));
+  txt = tree.filter((x) => typeof x === 'string').join(' | ');
+  const boxEl = tree.find((n) => n && n.props && n.props.class === 'cr-home-room');
+  const worldEl = tree.find((n) => n && n.props && n.props.class === 'cr-home-world');
+  ok('zoom (1.0.13): the box is marked for the bridge, the world inside it, and Arrange zooms without panning', boxEl && boxEl.props['data-ce-zoom'] === 'zoom' && worldEl && worldEl.props['data-ce-zoom-world'] === '1' && txt.indexOf('Pinch or scroll to zoom; double-tap') >= 0, boxEl && boxEl.props);
+  X.crHomeUi().arrange = false;
+  const tree2 = flat(X.CrHomeSurface()({ mobile: true }));
+  ok('zoom (1.0.13): outside Arrange the drag pans', tree2.find((n) => n && n.props && n.props.class === 'cr-home-room').props['data-ce-zoom'] === 'pan');
 
   console.log('\n' + pass + ' passing, ' + fail + ' failing');
   if (fail) process.exit(1);

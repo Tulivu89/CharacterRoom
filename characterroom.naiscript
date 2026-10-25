@@ -4,7 +4,7 @@ id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
 updatedAt: 1792780000000
-version: 1.0.12
+version: 1.0.13
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.12. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.13. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -61,7 +61,7 @@ SECTIONS (search "SECTION <NAME>")
   CR-GALLERY  stored images
   CR-STAGE    visual-novel view of the chat
   CR-HOME     Home: the Scenario's rooms, the chat's people placed by activity, room layers (over or under the
-              people, blend, opacity), zoom, Arrange (tap, drag, sliders), look / drop in / follow; with Home on, a speaker is told only their room (crHomeSpeakerRoom, in
+              people, blend, opacity), pinch / wheel zoom and drag pan (bridge [CR-ZOOM]), Arrange (tap, drag, sliders), look / drop in / follow; with Home on, a speaker is told only their room (crHomeSpeakerRoom, in
               crBrainView); place logic and the cr.home switch sit in CR-SETS
   MACRO-UI    macro list
   SCENARIO / USER / CONTACT   card templates, save, export; smart import (every Import button)
@@ -95,6 +95,7 @@ BRIDGE MESSAGES (channel "hypebot", envelope {type, sid, payload})
   The bridge also writes --ce-img-ar onto the nearest [data-ce-ar-host] when it paints.
   GENERATE_IMAGE from CR sets settings.qualityLast and settings.siteParams, and a characters[] entry may carry
   center {x, y}; bridge 3.0.37 honours them, and CE (which sends none) is unchanged. [CR-IMGV5]
+  Home's room box carries data-ce-zoom (bridge 3.0.40 acks zoom and handles pinch, wheel and pan in the page).
   settings.qualityStart / qualityMid carry chunks placed at the start / after the scene; a bridge that does not
   ack imgSpots (before 3.0.38) gets them folded into the prompt instead (crImgSend).
 
@@ -20719,6 +20720,7 @@ type CrBridgeState = {
   bridgeCrAware: boolean;
   bridgeCcavClear: boolean;
   bridgeImgSpots: boolean;
+  bridgeZoom: boolean;
   viewportW: number;
   viewportH: number;
   unknownEvents: string[];
@@ -20733,6 +20735,7 @@ let crBridge: CrBridgeState = {
   bridgeCrAware: false,
   bridgeCcavClear: false,
   bridgeImgSpots: false,
+  bridgeZoom: false,
   viewportW: 0,
   viewportH: 0,
   unknownEvents: []
@@ -20822,6 +20825,7 @@ async function crBridgeHandleMessage(msg: any) : Promise<void>
       crBridge.bridgeEngine = String(payload.engine || "");
       crBridge.bridgeCrAware = payload.crAware === true;
       crBridge.bridgeImgSpots = payload.imgSpots === true;
+      crBridge.bridgeZoom = payload.zoom === true;
       const ccavClear = payload.ccavClear === true;
       if (ccavClear !== crBridge.bridgeCcavClear){
         crBridge.bridgeCcavClear = ccavClear;
@@ -21983,13 +21987,13 @@ function CrStageSurface(props: { mobile: boolean }) : any
 // ============================================================================
 // A room's box takes its Home picture's own ratio (the bridge's --ce-img-ar), and every position is a fraction
 // of that box, so nothing is measured. Each figure and placed layer is its own ar-host so its picture keeps its
-// shape (§6.8b). Zoom widens an inner world inside a scrolling window: the browser does the panning.
+// shape (§6.8b). Zoom and pan are the bridge's: pinch, wheel and drag act on the world in the page, with no
+// round trip to the script (D-122).
 const CR_HOME_GRID = 10;
-const CR_HOME_ZOOMS = [1, 1.5, 2, 3, 4];
 const CR_LAYER_BLENDS = ["normal", "screen", "lighten", "overlay", "soft-light", "multiply"];
 
-type CrHomeUi = { look: string; arrange: boolean; sel: string; drag: string; zoom: number };
-let crHomeUi: CrHomeUi = { look: "", arrange: false, sel: "", drag: "", zoom: 1 };
+type CrHomeUi = { look: string; arrange: boolean; sel: string; drag: string };
+let crHomeUi: CrHomeUi = { look: "", arrange: false, sel: "", drag: "" };
 let crHomeSaveTimer = 0;
 
 function crHomeKey(charId: string, actId: string) : string
@@ -22216,6 +22220,7 @@ function CrHomeFigure(props: { k: string; charId: string; slot: string; name: st
   return h("div", {
     class: "cr-home-figure",
     "data-ce-ar-host": "1",
+    "data-ce-zoom-nopan": props.arrange ? "1" : undefined,
     onPointerDown: props.arrange ? () => { crHomeUi.sel = props.k; crHomeUi.drag = props.k; crTouch(); } : undefined,
     style: {
       position: "absolute", left: String(props.x * 100) + "%", top: String(props.y * 100) + "%",
@@ -22312,8 +22317,6 @@ function CrHomeSurface(props: { mobile: boolean }) : any
   const arrange = crHomeUi.arrange;
   const viewRoom = roomOf(view);
   const layers: CrRoomLayer[] = (viewRoom && viewRoom.layers) ? viewRoom.layers : [];
-  const zoom = CR_HOME_ZOOMS.indexOf(crHomeUi.zoom) >= 0 ? crHomeUi.zoom : 1;
-  const zoomAt = CR_HOME_ZOOMS.indexOf(zoom);
 
   type Fig = { k: string; charId: string; slot: string; name: string; x: number; y: number; scale: number };
   const figs: Fig[] = [];
@@ -22362,9 +22365,10 @@ function CrHomeSurface(props: { mobile: boolean }) : any
 
   const world = h("div", {
     class: "cr-home-world",
+    "data-ce-zoom-world": "1",
     onPointerUp: () => crHomeEndDrag(),
     onPointerLeave: () => crHomeEndDrag(),
-    style: { position: "relative", width: String(zoom * 100) + "%", aspectRatio: "var(--ce-img-ar, 1 / 1)" }
+    style: { position: "relative", width: "100%", aspectRatio: "var(--ce-img-ar, 1 / 1)" }
   },
     h("div", { style: { position: "absolute", inset: "0", display: "grid", placeItems: "center", color: CR_DIM, fontSize: CR_T_SM, padding: CR_S_3, textAlign: "center" } },
       "No Home picture for " + roomName(view) + " yet — add one on the Scenario's Brains tab."),
@@ -22380,10 +22384,11 @@ function CrHomeSurface(props: { mobile: boolean }) : any
   const box = h("div", {
     class: "cr-home-room",
     "data-ce-ar-host": "1",
+    "data-ce-zoom": arrange ? "zoom" : "pan",
     style: {
       position: "relative", width: "100%", aspectRatio: "var(--ce-img-ar, 1 / 1)", maxHeight: "78vh",
       background: CR_SUNK, border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
-      overflow: zoom > 1 ? "auto" : "hidden"
+      overflow: "hidden", touchAction: "none"
     }
   }, world);
 
@@ -22413,7 +22418,7 @@ function CrHomeSurface(props: { mobile: boolean }) : any
   const panel = selAct ? h(CrSection, {
     title: (selAct.char.name || "Unnamed") + "  ·  " + (selAct.act.name || "Activity"),
     note: "Tap a square to move it there, drag it with a mouse, or slide. Its picture's centre sits on the point. "
-      + "An uploaded animated WebP, GIF or PNG keeps moving; a transparent one shows the room through."
+      + "An uploaded animated WebP, GIF, PNG or SVG keeps moving; a transparent one shows the room through."
   }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
     h(CrField, { label: "Activity" },
       h(CrTextInput, { value: selAct.act.name, placeholder: "Sleeping", onSet: (v: string) => { const f = crHomeFind(k); if (f){ f.act.name = v.slice(0, 80); save(k); } } })),
@@ -22432,7 +22437,7 @@ function CrHomeSurface(props: { mobile: boolean }) : any
   )) : (selLayer ? h(CrSection, {
     title: roomName(view) + "  ·  " + (selLayer.layer.name || "Layer"),
     note: "A picture over or under the room's people — light, weather, a window's glow. Upload a transparent or "
-      + "animated WebP, GIF or PNG; Blend decides how it mixes with what is beneath it."
+      + "animated WebP, GIF, PNG or SVG; Blend decides how it mixes with what is beneath it."
   }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
     h(CrField, { label: "Layer" },
       h(CrTextInput, { value: selLayer.layer.name, placeholder: "Candlelight", onSet: (v: string) => { const f = crHomeFindLayer(k); if (f){ f.layer.name = v.slice(0, 80); save(k); } } })),
@@ -22468,16 +22473,14 @@ function CrHomeSurface(props: { mobile: boolean }) : any
         onClick: () => { crHomeUi.look = ""; crPickVariant(rooms.id, view).catch(() => {}); } }) : null,
       (crHomeUi.look || pinned) ? h(CrButton, { text: "Follow " + (contact.name || "the Contact"), icon: "",
         onClick: () => { crHomeUi.look = ""; if (pinned){ crUnpinVariant(rooms.id).catch(() => {}); } else { crTouch(); } } }) : null,
-      h("div", { style: { flex: "1 1 auto" } }),
-      h(CrButton, { text: "−", icon: "", disabled: zoomAt <= 0, onClick: () => { crHomeUi.zoom = CR_HOME_ZOOMS[Math.max(0, zoomAt - 1)]; crTouch(); } }),
-      h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, minWidth: "34px", textAlign: "center" } }, String(zoom) + "×"),
-      h(CrButton, { text: "+", icon: "", disabled: zoomAt >= CR_HOME_ZOOMS.length - 1, onClick: () => { crHomeUi.zoom = CR_HOME_ZOOMS[Math.min(CR_HOME_ZOOMS.length - 1, zoomAt + 1)]; crTouch(); } })
     ),
     crHomeOn ? null : h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
       "While Home is off the chat works as before. On, each speaker is told only the room they are in and who is there with them."),
     strip,
     h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
-      status + (zoom > 1 ? "  Scroll or swipe the picture to look around." : "")),
+      status + (crBridge.bridgeZoom
+        ? (arrange ? "  Pinch or scroll to zoom; double-tap to reset." : "  Pinch or scroll to zoom, drag to look around, double-tap to reset.")
+        : "  Update the bridge to 3.0.40 to zoom and pan.")),
     box,
     arrange ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
       h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "Add an activity in " + roomName(view) + " for"),
