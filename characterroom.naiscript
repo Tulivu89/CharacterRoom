@@ -3,8 +3,8 @@ compatibilityVersion: naiscript-1.0
 id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
-updatedAt: 1792990000000
-version: 1.0.16
+updatedAt: 1793000000000
+version: 1.0.17
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.16. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.17. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -43,7 +43,9 @@ SECTIONS (search "SECTION <NAME>")
   CR-DATA     CR-only card fields and import sanitizers
   CR-SETS     brain sets (one variant in use; Clothes sets replace the old image outfits), per-chat brain
               switches, Chat > Brains; the version in use resolves pinned > schedule > relationship > first
-              (crSetResolve; links in a Contact's cr.schedLinks, levels on a variant's intimacy)
+              (crSetResolve; links in a Contact's cr.schedLinks, levels on a variant's intimacy); the relationship
+              ladder (crLevelReaches, D-126): crBrainView hands the kernel conditional brains and schedule lines the
+              chat's level reaches as ungated, so a level opens everything at or below it
   CR-BUBBLE   chat bubble look: record, resolver, the message segmenter, shaped markers
   CR-UI       shell window, tokens, surfaces, editor portraits, report; Chat > Chat opens cards and lists the group;
               card lists with folders, search, sort and a grid [CR-FOLDERS]
@@ -6775,6 +6777,53 @@ function crSetIsOff(cardId: string, set: CrBrainSet) : boolean
   return crBrainIsOff(cardId, "s:" + set.id);
 }
 
+// [CR-SETS] D-126: relationship levels are a ladder — a level reaches everything gated at it or below it
+// (stranger < acquaintance < close < romantic), across conditional brains, schedule lines, Home's places and actions.
+const CR_LADDER: string[] = ["stranger", "acquaintance", "close", "romantic"];
+
+function crLevelReaches(have: string, need: string | undefined) : boolean
+{
+  if (!need || need === "none" || need === have){
+    return true;
+  }
+  const a = CR_LADDER.indexOf(have);
+  const b = CR_LADDER.indexOf(need);
+  return a >= 0 && b >= 0 && a >= b;
+}
+
+function crLevelLabel(need: string) : string
+{
+  return need === "none" ? "none" : (need === "romantic" ? "romantic" : need + " and up");
+}
+
+// AnotherRoom gates on an exact match. The kernel is left as it is and handed a view in which an entry the
+// ladder reaches reads as ungated; an entry above the chat's level keeps its gate, so AR still skips it.
+function crLadderOpen(req: any) : boolean
+{
+  return typeof req === "string" && req !== "none" && req !== chatSettings.intimacy && crLevelReaches(chatSettings.intimacy, req);
+}
+
+function crLadderSchedule(card: any) : any
+{
+  const sched = card ? card.schedule : undefined;
+  if (!sched || typeof sched !== "object"){
+    return undefined;
+  }
+  let hit = false;
+  const out: any = {};
+  Object.keys(sched).forEach((d) => {
+    const list: any[] = Array.isArray(sched[d]) ? sched[d] : [];
+    out[d] = list.map((e: any) => {
+      if (e && crLadderOpen(e.requiredIntimacy)){
+        hit = true;
+        return Object.assign({}, e, { requiredIntimacy: "none" });
+      }
+      return e;
+    });
+  });
+  return hit ? out : undefined;
+}
+
 function crBrainView(card: any) : any
 {
   if (!card){
@@ -6783,7 +6832,10 @@ function crBrainView(card: any) : any
   const sets = crCardSets(card).filter((s) => !crSetIsOff(card.id, s));
   const off = crBrainsOff[card.id] || [];
   const needs = crNeedsBrain(card);
-  if (!sets.length && !off.length && !needs){
+  const ladderConds = Array.isArray(card.brainsConditional)
+    && card.brainsConditional.some((b: BrainComplexConditional) => crLadderOpen(b.requiredIntimacy));
+  const ladderSched = crLadderSchedule(card);
+  if (!sets.length && !off.length && !needs && !ladderConds && !ladderSched){
     return card;
   }
   const copy: any = Object.assign({}, card);
@@ -6798,7 +6850,11 @@ function crBrainView(card: any) : any
       }
     }
     copy.brainsConditional = conds.filter((b: BrainComplexConditional) =>
-      off.indexOf("c:" + b.name) < 0 && off.indexOf("a:" + b.name) < 0);
+      off.indexOf("c:" + b.name) < 0 && off.indexOf("a:" + b.name) < 0)
+      .map((b: BrainComplexConditional) => crLadderOpen(b.requiredIntimacy) ? Object.assign({}, b, { requiredIntimacy: "none" }) : b);
+  }
+  if (ladderSched){
+    copy.schedule = ladderSched;
   }
   const home = crHomeSpeakerRoom(card);
   for (let i = 0; i < sets.length; i++){
@@ -7239,7 +7295,7 @@ function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string;
     if (mode === "off"){ state = "suppressed"; }
     else if (mode === "always"){ state = "always on"; tone = "accent"; }
     else if (!props.readsConditional){ state = "not read"; }
-    else if (c.requiredIntimacy && c.requiredIntimacy !== "none" && c.requiredIntimacy !== chatSettings.intimacy){ state = "needs " + c.requiredIntimacy; }
+    else if (c.requiredIntimacy && !crLevelReaches(chatSettings.intimacy, c.requiredIntimacy)){ state = "needs " + crLevelLabel(c.requiredIntimacy); }
     else if (fired && fired.names.indexOf(c.name) >= 0){ state = "fired last build"; tone = "accent"; }
     rows.push(h("div", {
       key: "c" + i,
@@ -11187,8 +11243,8 @@ function CrBrainsTab(props: { card: CrAnyCard; kind: CrCardKind; mobile: boolean
         })),
         h(CrChoice, {
           label: "Needs intimacy",
-          hint: "\"none\" means no requirement at all.",
-          options: REQUIRED_INTIMACY_LIST.map((r) => ({ id: r, label: r })),
+          hint: "\"none\" means no requirement at all. A level also opens it at every level above (D-126).",
+          options: REQUIRED_INTIMACY_LIST.map((r) => ({ id: r, label: crLevelLabel(r) })),
           active: c.requiredIntimacy || "none",
           onPick: (id: string) => { conds[i].requiredIntimacy = id as RequiredIntimacy; commitCond(); }
         }),
@@ -11662,7 +11718,7 @@ function crSchedLive(evt: ScheduleEvent, minutes: number) : boolean
 
 function crSchedGated(evt: ScheduleEvent) : boolean
 {
-  return evt.requiredIntimacy !== "none" && chatSettings.intimacy !== evt.requiredIntimacy;
+  return !crLevelReaches(chatSettings.intimacy, evt.requiredIntimacy);
 }
 
 function crSchedPct(minutes: number) : string
@@ -11714,7 +11770,7 @@ function CrDayStrip(props: {
           title: crFmtHM(p.evt.startTime) + " – " + crFmtHM(p.evt.endTime)
                  + (text ? " · " + text : " · (no text yet)")
                  + (p.wrapped ? " · runs past midnight" : "")
-                 + (gated ? " · needs intimacy: " + p.evt.requiredIntimacy : ""),
+                 + (gated ? " · needs " + crLevelLabel(p.evt.requiredIntimacy) : ""),
           style: {
             position: "absolute", top: String(li * props.laneH + 1) + "px",
             height: String(props.laneH - 2) + "px",
@@ -11960,8 +12016,8 @@ function CrEventSheet() : any
     }),
     h(CrChoice, {
       label: "Needs intimacy",
-      hint: "The kernel skips an event whose intimacy is not the chat's exactly — this is a match, not a floor.",
-      options: REQUIRED_INTIMACY_LIST.map((r) => ({ id: r, label: r })),
+      hint: "A floor: the event is on at this level and every level above it (D-126).",
+      options: REQUIRED_INTIMACY_LIST.map((r) => ({ id: r, label: crLevelLabel(r) })),
       active: evt.requiredIntimacy || "none",
       onPick: (id: string) => set({ requiredIntimacy: id })
     }),
@@ -12132,7 +12188,7 @@ function crSchedLinePills(e: ScheduleEvent) : any[]
     out.push(h(CrPill, { key: "on", text: "overnight" }));
   }
   if (e.requiredIntimacy !== "none"){
-    out.push(h(CrPill, { key: "in", text: e.requiredIntimacy, tone: crSchedGated(e) ? "" : "accent" }));
+    out.push(h(CrPill, { key: "in", text: crLevelLabel(e.requiredIntimacy), tone: crSchedGated(e) ? "" : "accent" }));
   }
   return out;
 }
