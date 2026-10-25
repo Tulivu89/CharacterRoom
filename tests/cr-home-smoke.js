@@ -1,13 +1,15 @@
 // ============================================================================
 // cr-home-smoke.js — Home  [CR-HOME]
 //
-// Pins engine 1.0.16 (D-117, D-118, D-120 to D-125): a Contact's schedule lines carry Home per Scenario (room,
+// Pins engine 1.0.18 (D-117, D-118, D-120 to D-127): a Contact's schedule lines carry Home per Scenario (room,
 // spot, picture), a nothing-on place, the User with the Contact unless dropped in, a speaker told only their own
 // room, nothing changed while Home is off, the Scenario's Locations with layers and atmosphere on the chat clock,
 // Arrange (tap, drag end saves, fresh targets), pictures, routines, the event sheet, the 1.0.13 migration and
 // the sanitizers; Arrange's line list drawn as the Schedule tab draws lines; needs and actions (drain on the chat
 // clock, effects, set picks, the needs brain, a low need's look, reactions written and sent); the Clock panel's draft
-// and Set the clock with its tally; While you were away (hand-set and real-time gaps, Catch up); Snapshot.
+// and Set the clock with its tally; While you were away (hand-set and real-time gaps, Catch up); Snapshot; the
+// relationship ladder in the UI (D-126); locked places, lines that move needs, scoped actions and the relationship
+// track with its step (D-127).
 //   CR_ENGINE_FILE=<engine> node cr-home-smoke.js
 // ============================================================================
 const fs = require('fs');
@@ -123,7 +125,9 @@ async function load(env) {
         'crNeedsCommit', 'crNeedsStarter', 'crNeedsOf', 'crHomeActionsOf', 'crNeedValue', 'crNeedsState', 'crHomeDoAction',
         'crHomeLog', 'crHomeSetNeedsLine', 'crHomeReact', 'crHomeSendReaction', 'CrNeedsSection', 'crNeedsText', 'crClockNow',
         'CrScheduleTab', 'crSetActive', 'crClockSetMode', 'crClockDraftSet', 'crClockApplyDraft', 'crClockTallyNote', 'crHomeTally',
-        'crHomeAwayInit', 'crIllus', 'CrClockPanel', 'CrHomeAway', 'crHomeSnapshot', 'crUiStore', 'crClockDraft'];
+        'crHomeAwayInit', 'crIllus', 'CrClockPanel', 'CrHomeAway', 'crHomeSnapshot', 'crUiStore', 'crClockDraft',
+        'crLineNeedsSet', 'crCareAt', 'crBondStep', 'crBondTakeStep', 'crHomeBadge', 'crHomeActionGate', 'crHomeLocked',
+        'crSchedGated', 'crSetIntimacy', 'crLevelReaches', 'CrNeedsSection', 'crEventNeedsChoice', 'crHomeSetNeed'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -322,12 +326,13 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
 
   // ---- needs and actions (1.0.15, D-124)
   txt = strings(X.CrNeedsSection()({ char: garm() }));
-  ok('needs: an empty Contact is offered the usual four', txt.indexOf('Start with Hunger, Energy, Fun and Company') >= 0, txt.slice(0, 300));
+  ok('needs: an empty Contact is offered the usual four and a track', txt.indexOf('Start with Hunger, Energy, Fun, Company and a Bond') >= 0, txt.slice(0, 300));
   const kitN = X.crNeedsStarter()();
   kitN.actions[0].set = { setId: 'sMood', variantId: 'vRain' };
-  await X.crNeedsCommit()(garm(), kitN.needs, kitN.actions);
+  await X.crNeedsCommit()(garm(), kitN.needs, kitN.actions, kitN.bond);
   const gStored = (await L.storage.get('characterListKey')).find((c) => c.id === 'c-garm').cr;
-  ok('needs: stored on the card', gStored.needs.length === 4 && gStored.homeActions.length === 4 && gStored.homeActions[0].set.variantId === 'vRain');
+  ok('needs: stored on the card, the gift waits a day and feeds the track', gStored.needs.length === 4 && gStored.homeActions.length === 5 && gStored.homeActions[0].set.variantId === 'vRain'
+    && gStored.homeActions[4].cooldown === 24 && gStored.homeActions[4].bond === 15 && gStored.bond.upAt === 60);
   const hunger = () => X.crNeedsOf()(garm())[0];
   ok('needs: full until the story first sets them', X.crNeedValue()('c-garm', hunger()) === 100);
   X.crNeedsState()['c-garm'] = { hunger: { v: 50, at: X.crClockNow()() - 5 * 3600000 } };
@@ -398,6 +403,91 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
   X.crHomeSnapshot()(port(), rooms(), gRoom);
   ok('snapshot: the room and who is in it go to Illustrate', X.crIllus().prompt.indexOf('@Garm: digging') >= 0 && X.crIllus().cast.indexOf('c-garm') >= 0 && X.crUiStore().get().surface === 'illustrator', X.crIllus().prompt);
 
+  // ---- the ladder (1.0.17, D-126)
+  ok('ladder: a level reaches what is gated at or below it, not above', X.crLevelReaches()('close', 'acquaintance') && X.crLevelReaches()('romantic', 'close')
+    && !X.crLevelReaches()('acquaintance', 'close') && X.crLevelReaches()('stranger', 'none'));
+  const gatedLine = { id: 'g', startTime: 0, endTime: 10, text: 'x', requiredIntimacy: 'acquaintance' };
+  ok('ladder: a line gated at acquaintance is on at close', X.crSchedGated()(gatedLine) === false && X.crSchedGated()(Object.assign({}, gatedLine, { requiredIntimacy: 'romantic' })) === true);
+
+  // ---- locked places (1.0.18, D-127)
+  await X.crClockSetMode()('story');
+  X.crHomeUi().arrange = false;
+  X.crHomeUi().look = '';
+  const gNow = X.crHomePlace()(garm(), rooms(), 's-port').room;
+  const gVar = () => rooms().variants.find((v) => v.id === gNow);
+  gVar().lock = 'close';
+  ok('locks: close and up opens at close', X.crHomeLocked()(gVar()) === false);
+  gVar().lock = 'romantic';
+  ok('locks: shut below its level', X.crHomeLocked()(gVar()) === true);
+  X.crHomeUi().look = gNow;
+  const lockTree = flat(X.CrHomeSurface()({ mobile: true }));
+  txt = lockTree.filter((x) => typeof x === 'string').join(' | ');
+  ok('locks: Home shows the lock, no one inside, and no Drop in', txt.indexOf('is shut to you for now') >= 0 && txt.indexOf('opens at romantic') >= 0 && txt.indexOf('🔒 ') >= 0
+    && txt.indexOf('Drop in') < 0 && !lockTree.some((n) => n && n.props && n.props.class === 'cr-home-figure'), txt.slice(0, 700));
+  X.crHomeUi().arrange = true;
+  ok('locks: Arrange still opens it', flat(X.CrHomeSurface()({ mobile: true })).filter((x) => typeof x === 'string').join(' | ').indexOf('is shut to you') < 0);
+  X.crHomeUi().arrange = false;
+  X.crHomeUi().look = '';
+  delete gVar().lock;
+
+  // ---- lines that move needs (D-127)
+  const eG = X.crScheduleOf()(garm()).Daily[0].id;
+  txt = strings(X.crEventNeedsChoice()(garm(), eG));
+  ok('lines: the event sheet offers each need\'s rate while it is on', txt.indexOf('Needs while this is on') >= 0 && txt.indexOf('Energy') >= 0, txt);
+  const eNow = () => Math.round(X.crCareAt()(garm(), X.crClockNow()()).needs.energy);
+  await X.crHomeSetNeed()(garm(), 'energy', 40);
+  await X.crLineNeedsSet()(garm(), eG, 'energy', 12);
+  ok('lines: stored on the card', X.crSanitizeContactExtra()(garm().cr).lineNeeds[eG].energy === 12);
+  const e0 = eNow();
+  X.crClockDraftSet()(X.crClockNow()() + 2 * 3600000);
+  await X.crClockApplyDraft()();
+  ok('lines: while the line is on the need moves at its rate, not its drop', eNow() === Math.min(100, e0 + 24), [e0, eNow()]);
+
+  // ---- scoped actions (D-127)
+  const gActs = JSON.parse(JSON.stringify(garm().cr.homeActions));
+  const other = rooms().variants.find((v) => v.id !== X.crHomePlace()(garm(), rooms(), 's-port').room);
+  gActs[1].rooms = [other.id];
+  gActs[2].level = 'romantic';
+  await X.crNeedsCommit()(garm(), garm().cr.needs, gActs);
+  const acts = () => garm().cr.homeActions;
+  ok('actions: shut outside their places, named', X.crHomeActionGate()(garm(), acts()[1]) === 'in ' + other.name);
+  ok('actions: shut below their level', X.crHomeActionGate()(garm(), acts()[2]) === 'at romantic');
+  await X.crHomeDoAction()(garm(), 'gift');
+  ok('actions: a wait after use, on the chat clock', /^again in (1 day|2[34]h)/.test(X.crHomeActionGate()(garm(), acts()[4])), X.crHomeActionGate()(garm(), acts()[4]));
+  const logN = X.crHomeLog().length;
+  await X.crHomeDoAction()(garm(), 'gift');
+  ok('actions: a shut action does nothing', X.crHomeLog().length === logN && L.rec.toasts.some((t) => /again in/.test(t.text)));
+
+  // ---- the relationship track (D-127)
+  const kNeeds = [{ id: 'mood', name: 'Mood', max: 100, decay: 0, low: 20 }];
+  await X.crNeedsCommit()(kat(), kNeeds, [{ id: 'date', name: 'Date', effects: {}, bond: 30, cooldown: 48 }], { name: 'Hers', max: 100, up: 10, down: 5, upAt: 60, downWhen: 'all' });
+  txt = strings(X.CrNeedsSection()({ char: kat() }));
+  ok('track: edited beside the needs', txt.indexOf('Relationship track') >= 0 && txt.indexOf('Rises while every need is at least (%)') >= 0, txt.slice(0, 500));
+  X.crHomeUi().look = '';
+  txt = strings(X.CrHomeSurface()({ mobile: true }));
+  ok('track: on Home for the paired Contact, at its starting half', txt.indexOf('Hers  ·  close') >= 0 && txt.indexOf('50/100') >= 0, txt.slice(0, 900));
+  X.crClockDraftSet()(X.crClockNow()() + 3 * 3600000);
+  await X.crClockApplyDraft()();
+  ok('track: rises while every need is high', Math.round(X.crCareAt()(kat(), X.crClockNow()()).bond) === 80, X.crCareAt()(kat(), X.crClockNow()()).bond);
+  ok('track: no step yet', X.crBondStep()(kat()).dir === '' && !X.crHomeBadge()());
+  await X.crHomeDoAction()(kat(), 'date');
+  const step = X.crBondStep()(kat());
+  ok('track: a date tops it up and the step up is offered, with a dot on the Home tab', step.dir === 'up' && step.to === 'romantic' && X.crHomeBadge()(), step);
+  txt = strings(X.CrHomeSurface()({ mobile: true }));
+  ok('track: Home shows the step', txt.indexOf('Ready') >= 0 && txt.indexOf('Become romantic') >= 0, txt.slice(0, 900));
+  await X.crBondTakeStep()(kat());
+  const stepItem = X.crHomeLog()[X.crHomeLog().length - 1];
+  ok('track: taking it moves the chat up a level and starts the track low', X.chatSettings().intimacy === 'romantic' && Math.round(X.crCareAt()(kat(), X.crClockNow()()).bond) === 20
+    && stepItem.kind === 'step' && stepItem.action === 'Now romantic', stepItem);
+  await X.crHomeReact()(stepItem.id);
+  ok('track: the step can be answered', /Kat has come to count Sam as romantic\./.test(X.crHomeUi().__msgs[2].content), X.crHomeUi().__msgs[2].content);
+  await X.crHomeSetNeed()(kat(), 'mood', 5);
+  X.crClockDraftSet()(X.crClockNow()() + 4 * 3600000);
+  await X.crClockApplyDraft()();
+  const down = X.crBondStep()(kat());
+  ok('track: falls while every need is low, and offers the step down when empty', Math.round(X.crCareAt()(kat(), X.crClockNow()()).bond) === 0 && down.dir === 'down' && down.to === 'close', down);
+  await X.crSetIntimacy()('close');
+
   txt = strings(X.CrScheduleTab()({ char: garm(), mobile: true }));
   ok('schedule tab: its lines and the needs editor', txt.indexOf('Digging') >= 0 && txt.indexOf('Needs and actions') >= 0 && txt.indexOf('Drops an hour') >= 0, txt.slice(0, 600));
 
@@ -413,6 +503,13 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
   const at = sc.sets[0].variants[0].atmos;
   ok('data: atmosphere lines clamp to the day and keep good layer ids', at.length === 1 && at[0].day === 'Daily' && at[0].start === 0 && at[0].end === 1439 && JSON.stringify(at[0].on) === '["l1"]' && at[0].alt === true && sc.sets[0].variants[0].layers[0].shown === false, at);
 
+  const sa = X.crSanitizeContactExtra()({ homeActions: [{ id: 'x', name: 'X', effects: {}, rooms: ['ok', 'bad id', 7], level: 'stranger', cooldown: -1, bond: 0 }],
+    lineNeeds: { 'e-1': { a: 3, 'bad id': 2, b: 'x' }, 'bad id': { a: 1 } }, bond: { max: 5000, upAt: 300, downWhen: 'weird' } });
+  ok('data: actions keep good places only, no stranger level, no empty wait or track effect; lines and the track clamp',
+    JSON.stringify(sa.homeActions[0].rooms) === '["ok"]' && !sa.homeActions[0].level && !sa.homeActions[0].cooldown && !sa.homeActions[0].bond
+    && JSON.stringify(sa.lineNeeds) === '{"e-1":{"a":3}}' && sa.bond.max === 1000 && sa.bond.upAt === 100 && sa.bond.downWhen === 'all', sa);
+  const sl = X.crSanitizeScenarioExtra()({ sets: [{ id: 'sR', name: 'R', rooms: true, variants: [{ id: 'v1', name: 'a', content: '', lock: 'close' }, { id: 'v2', name: 'b', content: '', lock: 'stranger' }] }] });
+  ok('data: a place keeps a lock above stranger', sl.sets[0].variants[0].lock === 'close' && !sl.sets[0].variants[1].lock);
   const nd = X.crSanitizeContactExtra()({ needs: [{ id: 'a', name: 'A', max: 5000, decay: -3, low: 9999, lowEmotion: 'tired' }, { id: 'bad id' }, { id: 'b', lowEmotion: 'grumpy' }],
     homeActions: [{ id: 'x', name: 'X', effects: { a: 10, b: 0, 'bad id': 5 }, set: { setId: 's1', variantId: 'no good' } }, { id: 'no good' }] });
   ok('data: needs clamp, bad ids and unknown emotions drop; zero or bad effects and broken set picks drop',
