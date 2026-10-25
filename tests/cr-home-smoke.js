@@ -1,12 +1,13 @@
 // ============================================================================
 // cr-home-smoke.js — Home  [CR-HOME]
 //
-// Pins engine 1.0.15 (D-117, D-118, D-120 to D-124): a Contact's schedule lines carry Home per Scenario (room,
+// Pins engine 1.0.16 (D-117, D-118, D-120 to D-125): a Contact's schedule lines carry Home per Scenario (room,
 // spot, picture), a nothing-on place, the User with the Contact unless dropped in, a speaker told only their own
 // room, nothing changed while Home is off, the Scenario's Locations with layers and atmosphere on the chat clock,
 // Arrange (tap, drag end saves, fresh targets), pictures, routines, the event sheet, the 1.0.13 migration and
 // the sanitizers; Arrange's line list drawn as the Schedule tab draws lines; needs and actions (drain on the chat
-// clock, effects, set picks, the needs brain, a low need's look, reactions written and sent).
+// clock, effects, set picks, the needs brain, a low need's look, reactions written and sent); the Clock panel's draft
+// and Set the clock with its tally; While you were away (hand-set and real-time gaps, Catch up); Snapshot.
 //   CR_ENGINE_FILE=<engine> node cr-home-smoke.js
 // ============================================================================
 const fs = require('fs');
@@ -121,7 +122,8 @@ async function load(env) {
         'crLineHomeOf', 'crHomeIdleOf', 'crPicsOf', 'crSchedPresetsOf', 'CrRoutinesSection',
         'crNeedsCommit', 'crNeedsStarter', 'crNeedsOf', 'crHomeActionsOf', 'crNeedValue', 'crNeedsState', 'crHomeDoAction',
         'crHomeLog', 'crHomeSetNeedsLine', 'crHomeReact', 'crHomeSendReaction', 'CrNeedsSection', 'crNeedsText', 'crClockNow',
-        'CrScheduleTab', 'crSetActive'];
+        'CrScheduleTab', 'crSetActive', 'crClockSetMode', 'crClockDraftSet', 'crClockApplyDraft', 'crClockTallyNote', 'crHomeTally',
+        'crHomeAwayInit', 'crIllus', 'CrClockPanel', 'CrHomeAway', 'crHomeSnapshot', 'crUiStore', 'crClockDraft'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -359,6 +361,43 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
   ok('reaction: kept on Home until sent', X.crHomeLog()[0].text.indexOf('Thanks, that hit the spot.') >= 0 && X.crHomeLog()[0].sent === false, X.crHomeLog()[0]);
   await X.crHomeSendReaction()(feedId);
   ok('reaction: Send writes it into the story once', X.crHomeUi().__wrote === X.crHomeLog()[0].text && X.crHomeLog()[0].sent === true);
+  // ---- the clock's draft and While you were away (1.0.16, D-125)
+  await X.crClockSetMode()('story');
+  const t0 = X.crClockNow()();
+  X.crClockDraftSet()(t0 + 3 * 3600000);
+  X.crClockDraftSet()(X.crClockDraft() + 30 * 60000);
+  ok('clock: hand moves build a draft and leave the clock alone', X.crClockNow()() === t0 && X.crClockDraft() === t0 + 210 * 60000);
+  txt = strings(X.CrClockPanel()({ mobile: true }));
+  ok('clock: the draft shows where it would land, with Set the clock', txt.indexOf('+3h 30m') >= 0 && txt.indexOf('Set the clock') >= 0 && txt.indexOf('Cancel') >= 0, txt.slice(0, 700));
+  const awayBefore = X.crHomeLog().filter((x) => x.kind === 'away').length;
+  await X.crClockApplyDraft()();
+  ok('clock: Set the clock moves it once', X.crClockNow()() === t0 + 210 * 60000 && X.crClockDraft() === 0);
+  const note = X.crClockTallyNote();
+  ok('clock: the tally says what passed, what each was doing and how needs fell',
+    note[0] === '3h 30m passed.' && note.some((l) => l === 'Garm was: Digging.') && note.some((l) => /^Garm's needs: Hunger \d+ → \d+\/100/.test(l)), note);
+  const away = X.crHomeLog().filter((x) => x.kind === 'away');
+  ok('away: a hand-set gap is logged on Home with its lines', away.length === awayBefore + 1 && away[away.length - 1].from === t0 && away[away.length - 1].lines.length === note.length - 1);
+  txt = strings(X.CrHomeAway()());
+  ok('away: Home shows the latest gap with Catch up', txt.indexOf('While you were away  ·  3h 30m') >= 0 && txt.indexOf('Garm was: Digging.') >= 0 && txt.indexOf('Catch up') >= 0, txt);
+  await X.crHomeReact()(away[away.length - 1].id);
+  const am = X.crHomeUi().__msgs;
+  ok('away: Catch up frames the gap as one system line in the Contact\'s voice', /^\[ Home: Time passes: 3h 30m, .* Garm was: Digging\. .*Kat tells Sam what happened meanwhile\. \]$/.test(am[2].content), am[2].content);
+  X.crClockDraftSet()(X.crClockNow()() - 3600000);
+  await X.crClockApplyDraft()();
+  ok('clock: going back logs nothing and says needs stay', X.crHomeLog().filter((x) => x.kind === 'away').length === away.length && /went back 1h/.test(X.crClockTallyNote()[0]));
+  await X.crClockSetMode()('real');
+  await X.story.set('cr.homeSeen', Date.now() - 2 * 3600000);
+  await X.crHomeAwayInit()();
+  const away2 = X.crHomeLog().filter((x) => x.kind === 'away');
+  ok('away: on open in real time, two hours closed is logged, and the visit restamped', away2.length === away.length + 1 && Date.now() - (await X.story.get('cr.homeSeen')) < 5000);
+  await X.crHomeAwayInit()();
+  ok('away: reopening at once logs nothing more', X.crHomeLog().filter((x) => x.kind === 'away').length === away2.length);
+  const sTree = flat(X.CrHomeSurface()({ mobile: true }));
+  ok('snapshot: offered on Home', sTree.some((n) => typeof n === 'string' && n === 'Snapshot'));
+  const gRoom = X.crHomePlace()(garm(), rooms(), 's-port').room;
+  X.crHomeSnapshot()(port(), rooms(), gRoom);
+  ok('snapshot: the room and who is in it go to Illustrate', X.crIllus().prompt.indexOf('@Garm: digging') >= 0 && X.crIllus().cast.indexOf('c-garm') >= 0 && X.crUiStore().get().surface === 'illustrator', X.crIllus().prompt);
+
   txt = strings(X.CrScheduleTab()({ char: garm(), mobile: true }));
   ok('schedule tab: its lines and the needs editor', txt.indexOf('Digging') >= 0 && txt.indexOf('Needs and actions') >= 0 && txt.indexOf('Drops an hour') >= 0, txt.slice(0, 600));
 

@@ -3,8 +3,8 @@ compatibilityVersion: naiscript-1.0
 id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
-updatedAt: 1792900000000
-version: 1.0.15
+updatedAt: 1792990000000
+version: 1.0.16
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.15. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.16. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -68,7 +68,10 @@ SECTIONS (search "SECTION <NAME>")
               Schedule): a Contact's needs drain on the chat clock, actions change them, pick a set version, and log
               for a reaction (crHomeReact / crHomeSendReaction, the Games React path). With Home on, a speaker is told
               only their room (crHomeSpeakerRoom, in crBrainView), and low needs as a Needs brain when asked
-              (crNeedsBrain). Place logic, needs state and the cr.home switch sit in CR-SETS
+              (crNeedsBrain). While you were away (CrHomeAway): a gap in the clock — Clock panel draft and Set the
+              clock (crClockApplyDraft), or real time with the story closed (crHomeAwayInit, onScriptsLoaded) — is
+              tallied (crHomeTally) and logged for Catch up; Snapshot hands the room to Illustrate. Place logic, needs
+              state, the tally and the cr.home switch sit in CR-SETS
   MACRO-UI    macro list
   SCENARIO / USER / CONTACT   card templates, save, export; smart import (every Import button)
   BUBBLES     markdown helpers, response parser
@@ -89,7 +92,7 @@ STORAGE
            floatyBrainsKey floatyBrainsStateKey floatyActiveIdsKey floatyInactiveIdsKey
            diaryBrainsRecordKey actionPlansRecordKey forumThreadsRecordKey
            emotionalMemoryRecordKey continuityCreationRecordKey cr.clockMode cr.clockStep
-           cr.group cr.rpg cr.brainsOff cr.home {on, needsLine} cr.needs cr.homeLog
+           cr.group cr.rpg cr.brainsOff cr.home {on, needsLine} cr.needs cr.homeLog cr.homeSeen
   history  cr.clock (undo rewinds the chat clock), cr.setActive (and the variant in use)
   temp     lastCropValuesTempKey, game display keys
 
@@ -4618,15 +4621,28 @@ async function crClockAdvance(minutes: number) : Promise<void>
   await crClockWrite(crClock.storyMs + Math.round(minutes) * CR_MIN_MS);
 }
 
+// Where Next morning and a time of day land from a given moment — the moves themselves and the Clock panel's draft.
+function crClockNextMorningMs(fromMs: number) : number
+{
+  const d = new Date(fromMs);
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
+                          Math.floor(CR_MORNING_MIN / 60), CR_MORNING_MIN % 60, 0, 0).getTime();
+  return target > fromMs ? target : target + CR_DAY_MIN * CR_MIN_MS;
+}
+
+function crClockTimeOfDayMs(fromMs: number, minutes: number) : number
+{
+  const m = ((Math.round(minutes) % CR_DAY_MIN) + CR_DAY_MIN) % CR_DAY_MIN;
+  const d = new Date(fromMs);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(m / 60), m % 60, 0, 0).getTime();
+}
+
 async function crClockNextMorning() : Promise<void>
 {
   if (!crClockActive()){
     return;
   }
-  const d = new Date(crClock.storyMs);
-  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(),
-                          Math.floor(CR_MORNING_MIN / 60), CR_MORNING_MIN % 60, 0, 0).getTime();
-  await crClockWrite(target > crClock.storyMs ? target : target + CR_DAY_MIN * CR_MIN_MS);
+  await crClockWrite(crClockNextMorningMs(crClock.storyMs));
 }
 
 async function crClockSetTimeOfDay(minutes: number) : Promise<void>
@@ -4634,10 +4650,7 @@ async function crClockSetTimeOfDay(minutes: number) : Promise<void>
   if (!crClockActive()){
     return;
   }
-  const m = ((Math.round(minutes) % CR_DAY_MIN) + CR_DAY_MIN) % CR_DAY_MIN;
-  const d = new Date(crClock.storyMs);
-  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(m / 60), m % 60, 0, 0);
-  await crClockWrite(target.getTime());
+  await crClockWrite(crClockTimeOfDayMs(crClock.storyMs, minutes));
 }
 
 async function crClockSetStep(minutes: number) : Promise<void>
@@ -5682,7 +5695,8 @@ const CR_HOME_ACTION_MAX = 12;
 const CR_HOME_LOG_MAX = 40;
 
 type CrNeedState = Record<string, Record<string, { v: number; at: number }>>;
-type CrHomeLogItem = { id: string; whoId: string; action: string; at: number; text: string; sent: boolean };
+type CrHomeLogItem = { id: string; whoId: string; action: string; at: number; text: string; sent: boolean;
+                       kind?: string; from?: number; lines?: string[]; dismissed?: boolean };
 
 let crNeedsState: CrNeedState = {};
 let crHomeLog: CrHomeLogItem[] = [];
@@ -5725,10 +5739,17 @@ function crSanitizeNeedsState(v: any) : CrNeedState
 function crSanitizeHomeLog(v: any) : CrHomeLogItem[]
 {
   const list: any[] = (v && Array.isArray(v.items)) ? v.items : [];
-  return list.filter((x) => x && typeof x.id === "string" && typeof x.whoId === "string").slice(-CR_HOME_LOG_MAX).map((x) => ({
-    id: x.id, whoId: x.whoId, action: String(x.action || "").slice(0, 80), at: Number(x.at) || 0,
-    text: String(x.text || "").slice(0, 4000), sent: x.sent === true
-  }));
+  return list.filter((x) => x && typeof x.id === "string" && typeof x.whoId === "string").slice(-CR_HOME_LOG_MAX).map((x) => {
+    const item: CrHomeLogItem = { id: x.id, whoId: x.whoId, action: String(x.action || "").slice(0, 80), at: Number(x.at) || 0,
+                                  text: String(x.text || "").slice(0, 4000), sent: x.sent === true };
+    if (x.kind === "away"){
+      item.kind = "away";
+      item.from = Number(x.from) || item.at;
+      item.lines = Array.isArray(x.lines) ? x.lines.filter((l: any) => typeof l === "string").slice(0, 24).map((l: string) => l.slice(0, 600)) : [];
+      if (x.dismissed === true){ item.dismissed = true; }
+    }
+    return item;
+  });
 }
 
 function crSanitizeNeeds(v: any) : CrNeed[] | undefined
@@ -5805,12 +5826,7 @@ function crHomeActionsOf(char: Character | undefined) : CrHomeAction[]
 // How full a need is now: full until first set, then draining at its rate per chat-clock hour since it was set.
 function crNeedValue(charId: string, n: CrNeed) : number
 {
-  const st = crNeedsState[charId] ? crNeedsState[charId][n.id] : undefined;
-  if (!st){
-    return n.max;
-  }
-  const hours = Math.max(0, (crClockNow() - st.at) / 3600000);
-  return Math.max(0, Math.min(n.max, st.v - n.decay * hours));
+  return crNeedValueAt(charId, n, crClockNow());
 }
 
 function crNeedsLow(char: Character) : CrNeed[]
@@ -5910,6 +5926,16 @@ function crHomeActionLine(item: CrHomeLogItem, who: Character) : string
   return said.replace(/\{\{char\}\}/g, who.name || "them").replace(/\{\{user\}\}/g, (user && user.name) || "you");
 }
 
+function crHomeAwayLine(item: CrHomeLogItem, who: Character) : string
+{
+  const user = crLiveUser();
+  const from = item.from || item.at;
+  return ("Time passes: " + crFmtSpan(item.at - from) + ", " + crFmtStamp(from) + " to " + crFmtStamp(item.at) + ". "
+    + (item.lines && item.lines.length ? item.lines.join(" ") + " " : "")
+    + "{{char}} tells {{user}} what happened meanwhile.")
+    .replace(/\{\{char\}\}/g, who.name || "them").replace(/\{\{user\}\}/g, (user && user.name) || "you");
+}
+
 let crHomeBusy = "";
 let crHomeNote = "";
 
@@ -5943,14 +5969,15 @@ async function crHomeReact(itemId: string) : Promise<void>
   });
   crHomeBusy = itemId;
   crGroupBusyId = "home:" + itemId;
-  crHomeNote = "Writing " + who.name + "'s reaction…";
+  crHomeNote = "Writing " + who.name + (item.kind === "away" ? "'s catch-up…" : "'s reaction…");
   crTouch();
   const probe = crGroupNewProbe(who.id);
   try{
     const built = await crGroupAssemble(who, probe, true);
     // The needs go in the frame line unless they are already in the context as a brain.
     const needs = (crHomeOn && crHomeNeedsLine) ? "" : crNeedsText(who);
-    const messages = crRpgFrame(built, "[ Home: " + crHomeActionLine(item, who) + (needs ? " " + needs : "") + " ]");
+    const said = item.kind === "away" ? crHomeAwayLine(item, who) : (crHomeActionLine(item, who) + (needs ? " " + needs : ""));
+    const messages = crRpgFrame(built, "[ Home: " + said + " ]");
     const member = crGroup.members.indexOf(who.id) >= 0 && chatSettings.char.id !== who.id;
     const raw = member ? await crGroupGenerate(who.id, messages, params, probe) : await crGroupRunLocal(messages, params, probe);
     const text = crGroupCleanReply(raw, who);
@@ -6015,6 +6042,214 @@ async function crHomeSendReaction(itemId: string) : Promise<void>
   if (item.sent){
     crChatImgProcess().catch((e) => { api.v1.error("[CR:chatimg] pass after a Home reaction failed:", e); });
   }
+}
+
+// [CR-HOME] While you were away (§6.12 step 4, D-125). A gap in the chat clock — the clock set forward by hand, or
+// real time passing with the story closed — is replayed into a short list: what each person's schedule had them
+// doing and where, and how far their needs fell. It is logged on Home for a Catch up in the Contact's voice.
+const CR_HOME_SEEN_KEY = "cr.homeSeen";
+const CR_HOME_AWAY_MIN = 30;          // a hand-set gap this long or longer is logged
+const CR_HOME_AWAY_REAL_MIN = 60;     // real time away this long or longer is logged on open
+const CR_HOME_SEEN_EVERY_MS = 5 * 60000;
+
+function crNeedValueAt(charId: string, n: CrNeed, ms: number) : number
+{
+  const st = crNeedsState[charId] ? crNeedsState[charId][n.id] : undefined;
+  if (!st){
+    return n.max;
+  }
+  const hours = Math.max(0, (ms - st.at) / 3600000);
+  return Math.max(0, Math.min(n.max, st.v - n.decay * hours));
+}
+
+function crFmtSpan(ms: number) : string
+{
+  const mins = Math.round(Math.abs(ms) / 60000);
+  const d = Math.floor(mins / CR_DAY_MIN);
+  const hr = Math.floor((mins % CR_DAY_MIN) / 60);
+  const m = mins % 60;
+  const out: string[] = [];
+  if (d){ out.push(String(d) + (d === 1 ? " day" : " days")); }
+  if (hr){ out.push(String(hr) + "h"); }
+  if (m || !out.length){ out.push(String(m) + "m"); }
+  return out.join(" ");
+}
+
+// What the gap held, one line per person per kind: the lines their schedule had on, in order, with the room each
+// was in here; then each need that fell, and whether it ended low.
+function crHomeTally(fromMs: number, toMs: number) : string[]
+{
+  const out: string[] = [];
+  if (!(toMs > fromMs)){
+    return out;
+  }
+  const scenario = crLiveScenario();
+  const rooms = scenario ? crHomeRoomsSet(scenario) : undefined;
+  const cast = crChatCast().filter((c) => !crIsUserCard(c)) as Character[];
+  const span = Math.min(toMs - fromMs, 14 * CR_DAY_MIN * CR_MIN_MS);
+  const step = Math.max(15 * CR_MIN_MS, Math.ceil(span / 1000));
+  cast.forEach((c) => {
+    const sched = crScheduleOf(c);
+    const lh = crLineHomeOf(c);
+    const seen: string[] = [];
+    const said: string[] = [];
+    for (let t = toMs - span; t <= toMs; t += step){
+      const day = crWeekdayOf(t) as Day;
+      const m = crMinutesOfDay(t);
+      const list = (sched[day] || []).concat(sched.Daily || []);
+      for (let i = 0; i < list.length; i++){
+        const e = list[i];
+        if (seen.indexOf(e.id) >= 0 || !crSchedLive(e, m) || !(e.text || "").trim()){
+          continue;
+        }
+        seen.push(e.id);
+        const rec = (scenario && lh[e.id]) ? lh[e.id][scenario.id] : undefined;
+        const room = (rec && rooms) ? rooms.variants.find((v) => v.id === rec.room) : undefined;
+        said.push((e.text || "").trim() + (room && room.name ? " (" + room.name + ")" : ""));
+      }
+    }
+    if (said.length){
+      out.push((c.name || "They") + " was: " + said.slice(0, 8).join("; ") + ".");
+    }
+    const fell: string[] = [];
+    crNeedsOf(c).forEach((n) => {
+      const a = crNeedValueAt(c.id, n, fromMs);
+      const b = crNeedValueAt(c.id, n, toMs);
+      if (a - b >= 1){
+        fell.push((n.name || "Need") + " " + String(Math.round(a)) + " → " + String(Math.round(b)) + "/" + String(n.max)
+          + (b <= n.low ? (a > n.low ? " (now low)" : " (low)") : ""));
+      }
+    });
+    if (fell.length){
+      out.push((c.name || "They") + "'s needs: " + fell.join(", ") + ".");
+    }
+  });
+  return out.slice(0, 24);
+}
+
+async function crHomeLogAway(fromMs: number, toMs: number) : Promise<CrHomeLogItem | undefined>
+{
+  const contact = crLiveContact();
+  if (!contact || !(toMs > fromMs)){
+    return undefined;
+  }
+  const item: CrHomeLogItem = { id: crShortId("h"), whoId: contact.id, action: "While you were away", at: toMs,
+                                text: "", sent: false, kind: "away", from: fromMs, lines: crHomeTally(fromMs, toMs) };
+  crHomeLog.push(item);
+  crHomeLog = crHomeLog.slice(-CR_HOME_LOG_MAX);
+  await crHomeSaveStoryState();
+  crTouch();
+  return item;
+}
+
+async function crHomeStampSeen() : Promise<void>
+{
+  try{ await api.v1.storyStorage.set(CR_HOME_SEEN_KEY, Date.now()); }
+  catch (e){ api.v1.error("[CR:home] could not stamp the visit:", e); }
+}
+
+function crHomeSeenLoop() : void
+{
+  api.v1.timers.setTimeout(() => {
+    if (crHomeOn && !crClockActive()){
+      crHomeStampSeen().catch(() => {});
+    }
+    crHomeSeenLoop();
+  }, CR_HOME_SEEN_EVERY_MS).catch((e) => { api.v1.error("[CR:home] visit timer failed:", e); });
+}
+
+// On open, on real time with Home on: an hour or more since the story was last open is logged, then the visit is
+// stamped every few minutes while it stays open, so the next gap starts where this one ends.
+async function crHomeAwayInit() : Promise<void>
+{
+  if (crHomeOn && !crClockActive()){
+    let seen = 0;
+    try{ seen = Number(await api.v1.storyStorage.get(CR_HOME_SEEN_KEY)) || 0; }
+    catch (e){ seen = 0; }
+    const now = Date.now();
+    if (seen > 0 && now - seen >= CR_HOME_AWAY_REAL_MIN * CR_MIN_MS){
+      await crHomeLogAway(seen, now);
+    }
+    await crHomeStampSeen();
+  }
+  crHomeSeenLoop();
+}
+
+// The Clock panel's hand moves are a draft until Set the clock: then the clock moves once and what the gap held is
+// shown there and, with Home on and a long enough gap, logged on Home.
+let crClockDraft = 0;
+let crClockTallyNote: string[] = [];
+
+function crClockDraftSet(ms: number) : void
+{
+  crClockDraft = (isFinite(ms) && ms > 0) ? ms : 0;
+  crClockTallyNote = [];
+  crTouch();
+}
+
+async function crClockApplyDraft() : Promise<void>
+{
+  if (!crClockDraft || !crClockActive()){
+    return;
+  }
+  const from = crClockNow();
+  const to = crClockDraft;
+  crClockDraft = 0;
+  const lines = crHomeTally(from, to);
+  await crClockWrite(to);
+  if (to > from){
+    crClockTallyNote = [crFmtSpan(to - from) + " passed."].concat(lines);
+    if (crHomeOn && to - from >= CR_HOME_AWAY_MIN * CR_MIN_MS){
+      await crHomeLogAway(from, to);
+    }
+  }
+  else {
+    crClockTallyNote = to < from ? ["The clock went back " + crFmtSpan(from - to) + ". Needs are not refilled by it."] : [];
+  }
+  crTouch();
+}
+
+// The schedule line on now for a person, Home part or not.
+function crHomeLiveLine(c: Character) : ScheduleEvent | undefined
+{
+  const now = crClockNow();
+  const sched = crScheduleOf(c);
+  const m = crMinutesOfDay(now);
+  return (sched[crWeekdayOf(now) as Day] || []).concat(sched.Daily || []).find((e) => crSchedLive(e, m) && !!(e.text || "").trim());
+}
+
+// Snapshot: the room in view, its people and what they are doing, handed to Illustrate to edit and generate.
+function crHomeSnapshot(scenario: Scenario, rooms: CrBrainSet, roomId: string) : void
+{
+  const room = rooms.variants.find((v) => v.id === roomId);
+  if (!room){
+    return;
+  }
+  const lines: string[] = [(room.prompt || "").trim() || ("indoors, " + (room.name || "room").toLowerCase())];
+  const ids: string[] = [];
+  (crChatCast().filter((c) => !crIsUserCard(c)) as Character[]).forEach((c) => {
+    const pl = crHomePlace(c, rooms, scenario.id);
+    if (pl.room !== roomId){
+      return;
+    }
+    const pic = (pl.spot && pl.spot.pic) ? crPicsOf(c).find((p) => p.id === pl.spot!.pic) : undefined;
+    const found = pl.line && pl.line !== CR_HOME_IDLE ? crScheduleFind(c, pl.line) : null;
+    const evt = found ? found.evt : crHomeLiveLine(c);
+    const doing = (pic && pic.prompt) ? pic.prompt : (evt && (evt.text || "").trim() ? evt.text.trim().toLowerCase() : "standing");
+    lines.push("@" + (c.name || "Unnamed") + ": " + doing);
+    ids.push(c.id);
+  });
+  const user = crLiveUser();
+  if (user && crHomeUserRoom(rooms, scenario.id) === roomId){
+    lines.push("@" + (user.name || "You") + ": standing");
+    ids.push(user.id);
+  }
+  crIllus.prompt = lines.join("\n");
+  crIllus.cast = ids.slice(0, CR_ILLUS_MAX_CAST);
+  crIllus.picks = {};
+  crIllus.tab = "compose";
+  crIllus.note = "From Home: " + (room.name || "a room") + ". Edit it, then Generate.";
+  crNav({ surface: "illustrator" });
 }
 
 const CR_LAYER_MAX = 8;
@@ -11290,7 +11525,9 @@ function CrClockPanel(props: { mobile: boolean }) : any
   const active = crClockActive();
   const nowMs = crClockNow();
   const step = crClock.stepMin;
-  const jump = (mins: number) => () => { crClockAdvance(mins).catch(() => {}); };
+  // Hand moves build a draft from wherever the draft stands; Set the clock moves it once (D-125).
+  const base = crClockDraft > 0 ? crClockDraft : crClock.storyMs;
+  const jump = (mins: number) => () => { crClockDraftSet(base + Math.round(mins) * CR_MIN_MS); };
   return h(CrSection, {
     title: "Clock",
     note: story
@@ -11325,17 +11562,34 @@ function CrClockPanel(props: { mobile: boolean }) : any
           h(CrButton, { text: "+30m", onClick: jump(30) }),
           h(CrButton, { text: "+1h", onClick: jump(60) }),
           h(CrButton, { text: "+8h", onClick: jump(480) }),
-          h(CrButton, { text: "Next morning", onClick: () => { crClockNextMorning().catch(() => {}); } })
+          h(CrButton, { text: "Next morning", onClick: () => { crClockDraftSet(crClockNextMorningMs(base)); } })
         )
       ) : null,
       story ? h(CrField, { label: "Move the day" },
         h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_1 } },
           h(CrButton, { text: "−1 day", onClick: jump(-CR_DAY_MIN) }),
           h(CrButton, { text: "+1 day", onClick: jump(CR_DAY_MIN) }),
-          h(CrButton, { text: "Set to 08:00", onClick: () => { crClockSetTimeOfDay(CR_MORNING_MIN).catch(() => {}); } }),
-          h(CrButton, { text: "Match device", onClick: () => { crClockResetToDevice().catch(() => {}); } })
+          h(CrButton, { text: "Set to 08:00", onClick: () => { crClockDraftSet(crClockTimeOfDayMs(base, CR_MORNING_MIN)); } }),
+          h(CrButton, { text: "Match device", onClick: () => { crClockDraftSet(crClockRoundHalf(Date.now())); } })
         )
       ) : null,
+      story ? h(CrField, { label: "Time of day", hint: "Type a time like 14:30 to put the draft there, on its own day." },
+        h(CrTextInput, { value: "", placeholder: crFmtHM(crMinutesOfDay(base)), onSet: (v: string) => {
+          const m = /^\s*(\d{1,2})\s*[:.]\s*(\d{2})\s*$/.exec(v);
+          if (m && Number(m[1]) < 24 && Number(m[2]) < 60){ crClockDraftSet(crClockTimeOfDayMs(base, Number(m[1]) * 60 + Number(m[2]))); }
+        } })) : null,
+      (story && crClockDraft > 0) ? h("div", {
+        style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center", padding: "8px 10px",
+                 border: CR_LINE_W + " solid " + CR_ACCENT, borderRadius: CR_RADIUS_S }
+      },
+        h("div", { style: { flex: "1 1 160px", minWidth: "0", color: CR_HEAD, fontSize: CR_T_MD } },
+          "Set to " + crFmtStamp(crClockDraft) + "  ·  " + crFmtDate(crClockDraft) + "  ·  "
+          + (crClockDraft >= nowMs ? "+" : "−") + crFmtSpan(crClockDraft - nowMs)),
+        h(CrButton, { text: "Set the clock", icon: "", primary: true, onClick: () => { crClockApplyDraft().catch(() => {}); } }),
+        h(CrButton, { text: "Cancel", icon: "", onClick: () => crClockDraftSet(0) })
+      ) : null,
+      (story && !crClockDraft && crClockTallyNote.length) ? h("div", { style: { display: "grid", gap: CR_S_1 } },
+        crClockTallyNote.map((ln, i) => h("div", { key: String(i), style: { color: i ? CR_TEXT : CR_HEAD, fontSize: CR_T_SM, lineHeight: "1.45" } }, ln))) : null,
       story ? h(CrChoice, {
         label: "Advance per reply",
         hint: "Added after every xialong reply. Off leaves the clock entirely in your hands.",
@@ -23263,6 +23517,7 @@ function CrHomeSurface(props: { mobile: boolean }) : any
         onClick: () => { crHomeSetOn(!crHomeOn).catch(() => {}); } }),
       h(CrButton, { text: arrange ? "Done arranging" : "Arrange", icon: "", primary: arrange,
         onClick: () => { crHomeUi.arrange = !arrange; crHomeUi.drag = ""; crTouch(); } }),
+      arrange ? null : h(CrButton, { text: "Snapshot", icon: "", onClick: () => crHomeSnapshot(scenario, rooms, view) }),
       caring.length ? h(CrButton, { text: crHomeNeedsLine ? "Needs go to the chat" : "Needs stay on Home", icon: "", primary: crHomeNeedsLine,
         onClick: () => { crHomeSetNeedsLine(!crHomeNeedsLine).catch(() => {}); } }) : null,
       view !== userRoom ? h(CrButton, { text: "Drop in", icon: "",
@@ -23279,6 +23534,7 @@ function CrHomeSurface(props: { mobile: boolean }) : any
         : "  Update the bridge to 3.0.40 to zoom and pan.")),
     box,
     crHomeNote ? h("div", { style: { color: CR_WARN, fontSize: CR_T_SM } }, crHomeNote) : null,
+    arrange ? null : h(CrHomeAway, null),
     care,
     arrange ? h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_1 } }, placeRows) : null,
     arrange ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
@@ -23645,6 +23901,36 @@ function CrNeedsSection(props: { char: Character }) : any
   ));
 }
 
+// [CR-HOME] The latest While you were away entry on Home: what the gap held, Catch up, Send to the chat, Dismiss.
+function CrHomeAway() : any
+{
+  const contact = crLiveContact();
+  const item = crHomeLog.slice().reverse().find((x) => x.kind === "away" && !x.dismissed);
+  if (!contact || !item){
+    return null;
+  }
+  const busy = !!crHomeBusy || !!crGroupBusyId;
+  const span = crFmtSpan(item.at - (item.from || item.at));
+  return h(CrSection, {
+    title: "While you were away  ·  " + span,
+    note: crFmtStamp(item.from || item.at) + " → " + crFmtStamp(item.at)
+  }, h("div", { style: { marginTop: CR_S_2, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2 } },
+    (item.lines && item.lines.length)
+      ? h("div", { style: { display: "grid", gap: CR_S_1 } },
+          item.lines.map((ln, i) => h("div", { key: String(i), style: { color: CR_TEXT, fontSize: CR_T_SM, lineHeight: "1.45" } }, ln)))
+      : h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, "Nothing on anyone's schedule, and no needs fell."),
+    item.text ? h("div", { style: { color: item.sent ? CR_DIM : CR_TEXT, fontSize: CR_T_SM, lineHeight: "1.45", whiteSpace: "pre-wrap",
+                                    borderLeft: "2px solid " + CR_LINE, paddingLeft: CR_S_2 } }, item.text) : null,
+    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+      item.sent ? h(CrPill, { text: "in the chat" })
+        : h(CrButton, { text: crHomeBusy === item.id ? "Writing…" : (item.text ? "Catch up again" : "Catch up"), icon: "", disabled: busy,
+            onClick: () => { crHomeReact(item.id).catch(() => {}); } }),
+      (item.text && !item.sent) ? h(CrButton, { text: "Send to the chat", icon: "", primary: true, disabled: busy,
+        onClick: () => { crHomeSendReaction(item.id).catch(() => {}); } }) : null,
+      h(CrButton, { text: "Dismiss", icon: "", onClick: () => { item.dismissed = true; crHomeSaveStoryState().catch(() => {}); crTouch(); } }))
+  ));
+}
+
 // [CR-HOME] Home's care panel for one cast member: their needs as meters, the actions, and what was done lately with
 // a reaction to ask for and send.
 function CrHomeCare(props: { char: Character; where: string }) : any
@@ -23652,7 +23938,7 @@ function CrHomeCare(props: { char: Character; where: string }) : any
   const char = props.char;
   const needs = crNeedsOf(char);
   const actions = crHomeActionsOf(char);
-  const log = crHomeLog.filter((x) => x.whoId === char.id).slice(-3).reverse();
+  const log = crHomeLog.filter((x) => x.whoId === char.id && x.kind !== "away").slice(-3).reverse();
   const busy = !!crHomeBusy || !!crGroupBusyId;
   return h(CrSection, {
     title: (char.name || "Unnamed") + (props.where ? "  ·  " + props.where : ""),
@@ -24871,6 +25157,7 @@ api.v1.hooks.register("onScriptsLoaded", async () => {
   crBridgeConnect().catch((e) => { api.v1.error("[CR:bridge] handshake loop failed:", e); });
   crGroupInit().catch((e) => { api.v1.error("[CR:group] init failed:", e); });
   crRpgInit().catch((e) => { api.v1.error("[CR:rpg] init failed:", e); });
+  crHomeAwayInit().catch((e) => { api.v1.error("[CR:home] away check failed:", e); });
 })
 
 api.v1.log(`Script "${api.v1.script.name}" initialized!`);
