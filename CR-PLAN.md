@@ -1,6 +1,6 @@
 # CharacterRoom — Plan & Inventory (CR-PLAN)
 
-**Doc version** 0.89 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
+**Doc version** 0.90 · **Source baseline** AnotherRoom 1.1.5 (Triplis), 10,275 lines, of which
 the last three are the random-name tables · **Target artifacts** `characterroom-vX.naiscript`
 (engine, LF) and the **shared bridge** — CE's bridge extended to serve both engines (D-15)
 
@@ -166,7 +166,7 @@ the last three are the random-name tables · **Target artifacts** `characterroom
 | ~~O-17~~ | **Closed by D-106.** **How a long card list is organised** (author's item 2, 2026-10-24). | (a) search box, sort (name, last paired, newest) and a row/grid toggle — no new data; (b) group by the `tags` a card already carries, one folding `CrHeading` (D-74) per tag; (c) folders the author names, one per card, kept account-level in a `cr.cardFolders` map rather than on the card, so an export does not carry the owner's filing; (d) a pinned row on top | (a) always, plus (c). **Not (b)**: `tags` is a prompt field — the kernel writes it into the sheet (`Tags:`, fixture `tags-merge`) — so filing by it would mean editing what the model reads to tidy a list. Asked of the author. **Widened 0.74**: the Group tab's member picker is the same long list, so one list component answers both. |
 | ~~O-18~~ | **Closed by D-107.** **A brain set: several variants, exactly one active** (author's item 3, 2026-10-24) — Scenario locations, outfits. What a variant is, where the choice lives, how it reaches context and images. | A variant = name, brain text, an image prompt pair, optionally its own image slot. **Owner**: any card (a Scenario for places, a Contact or User for outfits). **Choice**: (a) `historyStorage` per story, so undo rewinds a move; (b) `storyStorage`. **Context**: the K-CONTEXT adapter hands the kernel the active variant as one more brain of its owner, so SECTION K is untouched and parity holds for every chat with no sets. **Images**: the active pair joins the prompt the way the Scenario's base pair (D-46) and outfits do; a variant slot `<cardId>_em_<slot>` (bridge-safe name) replaces the Stage backdrop/Banner for a place, the portrait source for an outfit — no bridge change, the surface painter already takes `id\|slot`. **Existing outfits** (`CrImgCard.outfits`, image-only, several on at once): (i) keep them as layers beside sets; (ii) fold them into a set | (a), (i). A move is a story event, so undo should take it back; outfits stay because layering (coat over dress) is what they already do well, and folding them in is a migration (D-20). Model-driven switching waits: a location line written into the story is D-63's hazard. |
 | O-19 | **Tamagotchi mode** (author's item 4, concept, 2026-10-24). | §6.12. | Mapped at 0.80 as **Home**, four steps; step 1 (sets chosen by schedule and relationship) stands alone and comes first. All four steps built by engine 1.0.16 (D-124, D-125). Open until the author's live pass closes it. |
-| O-20 | **Qiulong as the flagship example** (author, 2026-10-25). | `Character_Qiulong.json`. | Update Qiulong to show everything the script can do — brains and sets, schedule with Home parts and pictures, needs and actions, Locations with atmosphere, image slots, group-ready. **Waits until O-19 (Tamagotchi / Home) is complete.** |
+| O-20 | **Qiulong as the flagship example** (author, 2026-10-25). | `Character_Qiulong_2e7c….json`, The Old Pine, §6.13. | Update Qiulong to show everything the script can do — brains and sets, schedule with Home parts and pictures, needs and actions, Locations with atmosphere, image slots, group-ready. Evaluated and mapped at 0.90 (§6.13): her card, the Discord variant and its live transcripts; the Home build and the engine gaps it needs (E1–E5). Premise question open (§6.13). |
 | O-21 | **A visual guide to go with Qiulong** (author, 2026-10-25). | After O-20. | An illustrated guide explaining what everything in the script means, using Qiulong as the running example. **Waits until O-19 is complete, then follows O-20.** |
 | ~~O-20~~ | **Closed by D-107.** **A Brains tab on Chat: every brain in play, live state, switch it here** (author's idea, 2026-10-24). One list for the paired Contact, the User, the Scenario and each group member — card brains, conditional brains, floaty brains, O-18's sets — showing which are in the next build and letting the author suppress or restore each for this chat. | **State shown**: plain brains are on unless suppressed; a conditional brain's state is whether it fired, so the list shows the last build's result (recorded in `onBeforeContextBuild`) beside its keys and intimacy gate rather than predicting it; a set shows as one row with its variant picker, which is where O-18 switches. **Where suppression lives**: (a) per story, `storyStorage` `cr.brainsOff` {cardId: names}; (b) `historyStorage`, so undo restores. **How it applies**: the K-CONTEXT adapter filters the owner's brains before the kernel sees them, exactly as O-18 adds a variant — SECTION K untouched, parity unaffected for any chat with nothing suppressed; a fixture pins a suppressed brain's absence. **Floaty brains** already have on/off; the tab writes their existing state rather than a second one. | (a): suppressing is a setting for this chat, not a story event. Build O-18 and O-20 as one patch series — the tab is O-18's switch. A suppressed brain is matched by name within its card, so a renamed brain comes back on; that is the safe failure. |
 
@@ -1263,6 +1263,79 @@ so it lands with a parity fixture.
 the first open of a story may run one catch-up unasked (D-40 says no unattended generation; the replay is free, the
 narration is a press).
 
+### 6.13 Qiulong as the flagship — evaluation and Tamagotchi map (O-20, proposal at 0.90)
+
+**Sources read.** The CR card (`Character_Qiulong_2e7c…`), The Old Pine, the Ambiguous Prophet user card, the Discord
+variant (`Character_Qiulong_Discord.json`, qiulong_bot 0.0.18) and its live channel transcripts (26 of her replies).
+
+**What the Discord pass fixed, to carry over.** Persona cut to the load-bearing behaviours (~600 words from ~900);
+schedule lines cut to bare activities, so no one recurring detail (the grudge against one old man, shushing the tomes)
+becomes her topic; examples in first person with less long-form lecture.
+**What the transcripts show going wrong anyway.** She drifts into a referee: the ultimatum template ("You're going to
+apologize, and you're going to rebuild the fort, or I'm going to…") six times in eighteen replies, crossed arms, "I wait"
+and "Now. <thing>." closers, consent lectures; no bets and no dice although the persona says she bets on everything;
+humour gone. The possessive-anger mode is the only intense register the examples teach in a group.
+
+**The CR card, by the patterns the model will copy.**
+- Every example and the greeting open on the same blocking — her lying the length of a bench or couch (4 of 5 plus the
+  greeting). Replies will open on a lounging pose.
+- The qipao slit falling open appears five times, stockinged feet in a lap or on a knee four, taking the user's
+  bun or drink as the closer four (the bun twice). Tells meant to be rationed are each a habit.
+- Outfit-bound prose: the examples name the qipao and its frog closures, but the outfit set swaps her into the
+  sweater by schedule — the model will keep narrating the qipao (field guide: outfits stay out of fixed text).
+- Closers: every example ends on a one-line command or question ("Try again." "Again." "Ask me later." "Rub.").
+- Emotions: smug five times of fourteen; the portraits and the mood follow it.
+- Persona ~900 words, past the 400–500 ceiling: the model tries to use every behaviour each reply — the question
+  barrage, mine, fixing things, flirting, all at once.
+- Kept: behaviour-based persona with friction and two anger gears, the seat-test greeting, grounded long-form
+  (amber, Ouyang Xiu), slow claiming, the hoard as intimacy-gated rooms.
+- Data: The Old Pine's place text has a double newline; its first layer has no name; sleep, lunch and breakfast are
+  all placed in the Front Hall; the needs and actions are the generic starter.
+
+**Premise for the kept version (open — the author's call).** The user keeps her; the fiction has to say why feeding
+and waking her are his to do. Candidates: (a) the Discord canon — he holds her true name, won at dice; (b) she owns
+the Old Pine and he lodges upstairs / keeps the books; (c) no premise — stranger at the teahouse, care is just company.
+
+**Places (The Old Pine's Locations set; she runs the teahouse in the afternoon).**
+| Place | When | Lock | Notes |
+|---|---|---|---|
+| Front Hall | dice / running the floor 17:00–19:00 | public | Old Lau, the corner bench; lanterns by atmosphere |
+| Back Room | Friday's private game 21:00–02:00 | acquaintance | mahjong, stakes |
+| Kitchen | Thursday cooking, lunch | public | |
+| Workshop | restoration bench 09:30–12:00 | acquaintance | the felt mat, this week's broken thing |
+| The Hoard (library, antiques, art) | Monday library, 22:00 walk with a cloth | acquaintance | conditional brains already keyed |
+| Portrait Hall and the Cabinet | — | close | the Cabinet brain is close-gated already |
+| Her nest | asleep 00:00–08:00, Friday nap | close | curled in her tail; hard to wake |
+| The Bathhouse | Tuesday 13:00–17:00 | close | steam layer; towel version of her outfit set |
+| Out | market, auction, estate sales, drawing class | — | no room: Home says where; the tally says what she brought back |
+
+**Needs (hers, not the starter).** Hunger (drops fast; meals refill), Energy (sleep refills), Warmth (she runs hot,
+cold gets to her: drafts, the evening; sun, the bathhouse, tea refill), Stakes (the gambling itch; dice refill),
+Attention (the fear of being replaceable; low reads as "who else do you talk to").
+**Actions.** Feed her (meat), Bring tea, Roll with her (a wager — Games dice), Bring something for the hoard,
+Let her sleep / Wake her (she bites), Scrub her back (bathhouse, close), Read with her (library), Change her clothes
+(outfit set). Each "what happens" line written in her world.
+
+**Engine gaps this needs (proposed order).**
+- **E1 Room locks.** A place gets a minimum relationship on the ladder stranger < acquaintance < close < romantic
+  (CR-side, not AR's exact-match `requiredIntimacy`, which would hide the bathhouse line at romantic). Locked: no Look
+  or Drop in, her figure hidden, status "somewhere private", the room brain not sent.
+- **E2 Out.** A line's Home part can be *out* (no room): she is away, Home and the tally say where. Today a line with no
+  Home part falls back to the nothing-on place.
+- **E3 Lines move needs.** A schedule line carries rates while it is on (asleep: Energy +12/h; lunch: Hunger +60/h;
+  bathhouse: Warmth up). The drain integrates over the schedule; without it needs only fall.
+- **E4 Scoped actions.** An action can be limited to places, lines or a relationship level, with an optional
+  cooldown (no feeding ten times a minute).
+- **E5 (optional) Claiming.** A "hers" track filled by care and by coming back after an absence, which offers — never
+  makes — a relationship step. Her persona already says how she claims people.
+
+**Card work, after the premise.** Persona to ~550 words in the Discord cut's direction, keeping one long-form trigger
+and the quiet-polite anger gear; five examples spread across places (teahouse, workshop, kitchen, hoard, nest or bath)
+and relationship stages, each tell used once, outfit-neutral, varied closers and emotions; one **care** example — fed
+or woken, she takes it as owed and pays it back her way; humour and a live bet shown, not only claimed. Schedule lines
+short, each with room, spot, picture, outfit version and need rates. Scenario: one Location per place with Home and
+Stage pictures, atmosphere lines (lanterns, steam, Friday's back-room noise) and layers. Then O-21's guide.
+
 ## 7. CE reuse map
 
 | CE piece | CR use |
@@ -1427,6 +1500,8 @@ Project instructions: `CR-PROJECT-INSTRUCTIONS.md`.
 ---
 
 ## 10. Changelog
+
+- **0.90** — plan only: §6.13 Qiulong evaluated (CR card, Discord variant and transcripts) and the Tamagotchi build mapped — places, needs, actions, engine gaps E1–E5; O-20 updated, premise question open.
 
 - **0.89** — engine 1.0.16: D-125 (Clock draft with Set the clock and its tally; While you were away with Catch up; Snapshot). O-20 (Qiulong as the flagship example) and O-21 (a visual guide with Qiulong) opened, both after O-19. `cr-home-smoke.js` 77.
 
