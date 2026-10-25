@@ -3,8 +3,8 @@ compatibilityVersion: naiscript-1.0
 id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
-updatedAt: 1792990000000
-version: 1.0.16
+updatedAt: 1793010000000
+version: 1.0.18
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.16. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.18. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -43,7 +43,9 @@ SECTIONS (search "SECTION <NAME>")
   CR-DATA     CR-only card fields and import sanitizers
   CR-SETS     brain sets (one variant in use; Clothes sets replace the old image outfits), per-chat brain
               switches, Chat > Brains; the version in use resolves pinned > schedule > relationship > first
-              (crSetResolve; links in a Contact's cr.schedLinks, levels on a variant's intimacy)
+              (crSetResolve; links in a Contact's cr.schedLinks, levels on a variant's intimacy); the relationship
+              ladder (crLevelReaches, D-126): crBrainView hands the kernel conditional brains and schedule lines the
+              chat's level reaches as ungated, so a level opens everything at or below it
   CR-BUBBLE   chat bubble look: record, resolver, the message segmenter, shaped markers
   CR-UI       shell window, tokens, surfaces, editor portraits, report; Chat > Chat opens cards and lists the group;
               card lists with folders, search, sort and a grid [CR-FOLDERS]
@@ -68,7 +70,10 @@ SECTIONS (search "SECTION <NAME>")
               Schedule): a Contact's needs drain on the chat clock, actions change them, pick a set version, and log
               for a reaction (crHomeReact / crHomeSendReaction, the Games React path). With Home on, a speaker is told
               only their room (crHomeSpeakerRoom, in crBrainView), and low needs as a Needs brain when asked
-              (crNeedsBrain). While you were away (CrHomeAway): a gap in the clock — Clock panel draft and Set the
+              (crNeedsBrain). D-127: places locked below a relationship (variant.lock, crHomeLocked); schedule lines
+              that move needs while on (cr.lineNeeds); a relationship track (cr.bond) that offers a step up or down
+              (crBondStep, the Home tab's dot); actions limited by place, level and a wait, or aimed at the track;
+              levels read by replaying the chat clock (crCareAt). While you were away (CrHomeAway): a gap in the clock — Clock panel draft and Set the
               clock (crClockApplyDraft), or real time with the story closed (crHomeAwayInit, onScriptsLoaded) — is
               tallied (crHomeTally) and logged for Catch up; Snapshot hands the room to Illustrate. Place logic, needs
               state, the tally and the cr.home switch sit in CR-SETS
@@ -4938,6 +4943,7 @@ interface CrSetVariant {
   intimacy?: string[];   // relationship levels this version is for (INTIMACY_LIST)
   layers?: CrRoomLayer[];   // a Home room's layers (picture slot l-<id> on the Scenario)
   atmos?: CrAtmosLine[];    // a place's atmosphere schedule
+  lock?: string;            // a Home place shut below this relationship (D-127)
 }
 
 // [CR-HOME] A picture over or under a room's people: the whole room, or one spot like an activity.
@@ -5046,7 +5052,10 @@ interface CrScenarioExtra {
 
 // [CR-HOME] D-124: a need drains by decay per chat-clock hour from max; at or under low it counts as low.
 interface CrNeed { id: string; name: string; max: number; decay: number; low: number; lowEmotion?: string; }
-interface CrHomeAction { id: string; name: string; effects: Record<string, number>; say?: string; set?: { setId: string; variantId: string }; }
+interface CrHomeAction { id: string; name: string; effects: Record<string, number>; say?: string; set?: { setId: string; variantId: string };
+                         rooms?: string[]; level?: string; cooldown?: number; bond?: number; }
+// [CR-HOME] D-127: the relationship track — rises while every need is at upAt% or more, falls while needs are low.
+interface CrBond { name: string; max: number; up: number; down: number; upAt: number; downWhen: string; }
 
 interface CrContactExtra {
   images?: CrContactImages;
@@ -5063,6 +5072,8 @@ interface CrContactExtra {
   schedPresets?: CrSchedPreset[];
   needs?: CrNeed[];
   homeActions?: CrHomeAction[];
+  lineNeeds?: Record<string, Record<string, number>>;   // schedule event id -> need id -> change an hour while on
+  bond?: CrBond;
 }
 
 const CR_MAX_STATUS = 200;
@@ -5509,6 +5520,14 @@ function crSanitizeContactExtra(v: any) : CrContactExtra | undefined
   if (homeActions){
     out.homeActions = homeActions;
   }
+  const lineNeeds = crSanitizeLineNeeds((v as any).lineNeeds);
+  if (lineNeeds){
+    out.lineNeeds = lineNeeds;
+  }
+  const bond = crSanitizeBond((v as any).bond);
+  if (bond){
+    out.bond = bond;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -5647,6 +5666,7 @@ function crSanitizeSets(v: any) : CrBrainSet[] | undefined
       if (layers){ one.layers = layers; }
       const atmos = crSanitizeAtmos(r.atmos);
       if (atmos){ one.atmos = atmos; }
+      if (typeof r.lock === "string" && CR_LADDER.indexOf(r.lock) > 0){ one.lock = r.lock; }
       vars.push(one);
     }
     const set: CrBrainSet = { id: sid, name: crSanitizeText(raw.name, 80) || "", variants: vars };
@@ -5696,7 +5716,7 @@ const CR_HOME_LOG_MAX = 40;
 
 type CrNeedState = Record<string, Record<string, { v: number; at: number }>>;
 type CrHomeLogItem = { id: string; whoId: string; action: string; at: number; text: string; sent: boolean;
-                       kind?: string; from?: number; lines?: string[]; dismissed?: boolean };
+                       kind?: string; from?: number; lines?: string[]; dismissed?: boolean; act?: string };
 
 let crNeedsState: CrNeedState = {};
 let crHomeLog: CrHomeLogItem[] = [];
@@ -5742,6 +5762,11 @@ function crSanitizeHomeLog(v: any) : CrHomeLogItem[]
   return list.filter((x) => x && typeof x.id === "string" && typeof x.whoId === "string").slice(-CR_HOME_LOG_MAX).map((x) => {
     const item: CrHomeLogItem = { id: x.id, whoId: x.whoId, action: String(x.action || "").slice(0, 80), at: Number(x.at) || 0,
                                   text: String(x.text || "").slice(0, 4000), sent: x.sent === true };
+    if (typeof x.act === "string" && /^[A-Za-z0-9_-]{1,24}$/.test(x.act)){ item.act = x.act; }
+    if (x.kind === "step"){
+      item.kind = "step";
+      item.lines = Array.isArray(x.lines) ? x.lines.filter((l: any) => typeof l === "string").slice(0, 2).map((l: string) => l.slice(0, 300)) : [];
+    }
     if (x.kind === "away"){
       item.kind = "away";
       item.from = Number(x.from) || item.at;
@@ -5806,6 +5831,13 @@ function crSanitizeHomeActions(v: any) : CrHomeAction[] | undefined
     if (r.set && typeof r.set === "object" && /^[A-Za-z0-9_-]{1,32}$/.test(String(r.set.setId || "")) && /^[A-Za-z0-9_-]{1,32}$/.test(String(r.set.variantId || ""))){
       a.set = { setId: String(r.set.setId), variantId: String(r.set.variantId) };
     }
+    const rooms = Array.isArray(r.rooms) ? r.rooms.filter((x: any) => typeof x === "string" && /^[A-Za-z0-9_-]{1,32}$/.test(x)).slice(0, 16) : [];
+    if (rooms.length){ a.rooms = rooms; }
+    if (typeof r.level === "string" && CR_LADDER.indexOf(r.level) > 0){ a.level = r.level; }
+    const cd = Number(r.cooldown);
+    if (isFinite(cd) && cd > 0){ a.cooldown = Math.min(720, Math.round(cd * 10) / 10); }
+    const bd = Number(r.bond);
+    if (isFinite(bd) && bd !== 0){ a.bond = Math.max(-1000, Math.min(1000, Math.round(bd))); }
     out.push(a);
   }
   return out.length ? out : undefined;
@@ -5862,6 +5894,252 @@ function crNeedsBrain(card: any) : BrainEntry | undefined
   return text ? { name: "Needs", content: text } : undefined;
 }
 
+// [CR-HOME] D-127: what a schedule line does to needs while it is on, a relationship track, and the walk that works
+// out where every need and the track stand at any moment. Levels are stored as {v, at}; reading one replays the
+// chat clock from there in quarter-hour steps: each need moves at the rate the line on at the time gives it (or
+// falls by its own decay), and the track rises while every need is high enough and falls while needs are low.
+const CR_BOND_ID = "_bond";
+const CR_CARE_STEP = 15 * CR_MIN_MS;
+const CR_CARE_SPAN = 14 * CR_DAY_MIN * CR_MIN_MS;
+let crCareCache: Record<string, { needs: Record<string, number>; bond: number }> = {};
+let crCareCacheN = 0;
+
+function crSanitizeLineNeeds(v: any) : Record<string, Record<string, number>> | undefined
+{
+  if (!v || typeof v !== "object"){
+    return undefined;
+  }
+  const out: Record<string, Record<string, number>> = {};
+  Object.keys(v).slice(0, 200).forEach((eid) => {
+    const row = v[eid];
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(eid) || !row || typeof row !== "object"){
+      return;
+    }
+    const keep: Record<string, number> = {};
+    Object.keys(row).slice(0, CR_NEED_MAX).forEach((nid) => {
+      const r = Number(row[nid]);
+      if (/^[A-Za-z0-9_-]{1,24}$/.test(nid) && isFinite(r)){
+        keep[nid] = Math.max(-1000, Math.min(1000, Math.round(r * 10) / 10));
+      }
+    });
+    if (Object.keys(keep).length){ out[eid] = keep; }
+  });
+  return Object.keys(out).length ? out : undefined;
+}
+
+function crSanitizeBond(v: any) : CrBond | undefined
+{
+  if (!v || typeof v !== "object"){
+    return undefined;
+  }
+  const num = (x: any, lo: number, hi: number, d: number) => {
+    const n = Number(x);
+    return isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
+  };
+  return {
+    name: crSanitizeText(v.name, 40) || "",
+    max: Math.round(num(v.max, 1, 1000, 100)),
+    up: num(v.up, 0, 1000, 4),
+    down: num(v.down, 0, 1000, 4),
+    upAt: Math.round(num(v.upAt, 0, 100, 60)),
+    downWhen: v.downWhen === "any" ? "any" : "all"
+  };
+}
+
+function crLineNeedsOf(char: Character | undefined) : Record<string, Record<string, number>>
+{
+  const extra: any = char ? char.cr : undefined;
+  return (extra && extra.lineNeeds && typeof extra.lineNeeds === "object") ? extra.lineNeeds : {};
+}
+
+function crBondOf(char: Character | undefined) : CrBond | undefined
+{
+  const extra: any = char ? char.cr : undefined;
+  return (extra && extra.bond && typeof extra.bond === "object") ? extra.bond : undefined;
+}
+
+function crCareAt(char: Character, ms: number) : { needs: Record<string, number>; bond: number }
+{
+  const needs = crNeedsOf(char);
+  const cfg = crBondOf(char);
+  const rows = crNeedsState[char.id] || {};
+  const lineNeeds = crLineNeedsOf(char);
+  const t = Math.floor(ms / CR_MIN_MS) * CR_MIN_MS;
+  const key = char.id + "|" + t + "|" + chatSettings.intimacy + "|" + JSON.stringify(rows) + "|" + JSON.stringify(needs)
+    + "|" + JSON.stringify(cfg || null) + "|" + JSON.stringify(lineNeeds) + "|" + JSON.stringify(char.schedule || null);
+  const hit = crCareCache[key];
+  if (hit){
+    return { needs: Object.assign({}, hit.needs), bond: hit.bond };
+  }
+  const clamp = (x: number, hi: number) => Math.max(0, Math.min(hi, x));
+  const vals: Record<string, number> = {};
+  needs.forEach((n) => { vals[n.id] = rows[n.id] ? clamp(rows[n.id].v, n.max) : n.max; });
+  const bst = cfg ? rows[CR_BOND_ID] : undefined;
+  let bond = cfg ? (bst ? clamp(bst.v, cfg.max) : Math.round(cfg.max / 2)) : NaN;
+  const starts = needs.filter((n) => !!rows[n.id]).map((n) => rows[n.id].at).concat(bst ? [bst.at] : []);
+  let from = starts.length ? Math.min.apply(null, starts) : t;
+  from = Math.max(from, t - CR_CARE_SPAN);
+  const sched = crScheduleOf(char);
+  const paired = !!(chatSettings.char && chatSettings.char.id === char.id);
+  for (let a = from; a < t; a += CR_CARE_STEP){
+    const b = Math.min(t, a + CR_CARE_STEP);
+    if (cfg && bst && bst.at < b && needs.length){
+      const allUp = needs.every((n) => vals[n.id] >= n.max * cfg.upAt / 100);
+      const lows = needs.filter((n) => vals[n.id] <= n.low).length;
+      const falling = cfg.downWhen === "any" ? lows > 0 : lows === needs.length;
+      const rate = allUp ? cfg.up : (falling ? -cfg.down : 0);
+      bond = clamp(bond + rate * (b - Math.max(a, bst.at)) / 3600000, cfg.max);
+    }
+    if (!needs.length){
+      continue;
+    }
+    const m = crMinutesOfDay(a);
+    const live = (sched.Daily || []).concat(sched[crWeekdayOf(a) as Day] || [])
+      .filter((e) => crSchedLive(e, m) && !(paired && crSchedGated(e)));
+    needs.forEach((n) => {
+      const st = rows[n.id];
+      if (!st || st.at >= b){
+        return;
+      }
+      let rate = -n.decay;
+      for (let i = 0; i < live.length; i++){
+        const r = lineNeeds[live[i].id];
+        if (r && typeof r[n.id] === "number"){
+          rate = r[n.id];
+          break;
+        }
+      }
+      vals[n.id] = clamp(vals[n.id] + rate * (b - Math.max(a, st.at)) / 3600000, n.max);
+    });
+  }
+  if (++crCareCacheN > 300){
+    crCareCache = {};
+    crCareCacheN = 0;
+  }
+  crCareCache[key] = { needs: Object.assign({}, vals), bond: bond };
+  return { needs: vals, bond: bond };
+}
+
+// Every level and the track set to where they stand now, so the walk always starts from one moment.
+function crCareSnapshot(char: Character, now: number) : Record<string, { v: number; at: number }>
+{
+  const cur = crCareAt(char, now);
+  const row: Record<string, { v: number; at: number }> = {};
+  crNeedsOf(char).forEach((n) => { row[n.id] = { v: cur.needs[n.id], at: now }; });
+  const cfg = crBondOf(char);
+  if (cfg){
+    row[CR_BOND_ID] = { v: cur.bond, at: now };
+  }
+  return row;
+}
+
+// A Contact's needs start draining the first time Home sees them in a story, not before.
+function crCareSeed(char: Character) : void
+{
+  const needs = crNeedsOf(char);
+  const cfg = crBondOf(char);
+  const rows = crNeedsState[char.id] || {};
+  const now = crClockNow();
+  let changed = false;
+  needs.forEach((n) => {
+    if (!rows[n.id]){ rows[n.id] = { v: n.max, at: now }; changed = true; }
+  });
+  if (cfg && !rows[CR_BOND_ID]){
+    rows[CR_BOND_ID] = { v: Math.round(cfg.max / 2), at: now };
+    changed = true;
+  }
+  if (changed){
+    crNeedsState[char.id] = rows;
+    crHomeSaveStoryState().catch(() => {});
+  }
+}
+
+function crBondValue(char: Character) : number
+{
+  return crBondOf(char) ? crCareAt(char, crClockNow()).bond : NaN;
+}
+
+// The track belongs to the paired Contact: it offers the chat's relationship one step up when full, down when empty.
+function crBondStep(char: Character) : { dir: string; to: string }
+{
+  const cfg = crBondOf(char);
+  if (!cfg || !chatSettings.char || chatSettings.char.id !== char.id){
+    return { dir: "", to: "" };
+  }
+  const v = crBondValue(char);
+  const i = CR_LADDER.indexOf(chatSettings.intimacy);
+  if (v >= cfg.max && i >= 0 && i < CR_LADDER.length - 1){
+    return { dir: "up", to: CR_LADDER[i + 1] };
+  }
+  if (v <= 0 && i > 0){
+    return { dir: "down", to: CR_LADDER[i - 1] };
+  }
+  return { dir: "", to: "" };
+}
+
+function crHomeBadge() : boolean
+{
+  const contact = crLiveContact();
+  return !!contact && crBondStep(contact).dir !== "";
+}
+
+async function crBondTakeStep(char: Character) : Promise<void>
+{
+  const step = crBondStep(char);
+  const cfg = crBondOf(char);
+  if (!step.dir || !cfg){
+    return;
+  }
+  const now = crClockNow();
+  const row = crCareSnapshot(char, now);
+  row[CR_BOND_ID] = { v: Math.round(cfg.max * (step.dir === "up" ? 0.2 : 0.8)), at: now };
+  crNeedsState[char.id] = row;
+  crHomeLog.push({ id: crShortId("h"), whoId: char.id, action: (step.dir === "up" ? "Now " : "Back to ") + step.to, at: now,
+                   text: "", sent: false, kind: "step",
+                   lines: [step.dir === "up" ? "{{char}} has come to count {{user}} as " + step.to + "."
+                                             : "{{char}} has cooled toward {{user}}; they are back to " + step.to + "."] });
+  crHomeLog = crHomeLog.slice(-CR_HOME_LOG_MAX);
+  await crHomeSaveStoryState();
+  await crSetIntimacy(step.to);
+  crTouch();
+}
+
+// Why an action cannot be done right now, or "" when it can: its level, its places, its wait.
+function crHomeActionGate(char: Character, a: CrHomeAction) : string
+{
+  if (a.level && !crLevelReaches(chatSettings.intimacy, a.level)){
+    return "at " + crLevelLabel(a.level);
+  }
+  const scenario = crLiveScenario();
+  const rooms = scenario ? crHomeRoomsSet(scenario) : undefined;
+  if (scenario && rooms && a.rooms && a.rooms.length){
+    const here = a.rooms.filter((id) => rooms.variants.some((v) => v.id === id));
+    if (here.length && here.indexOf(crHomePlace(char, rooms, scenario.id).room) < 0){
+      return "in " + here.map((id) => { const v = rooms.variants.find((x) => x.id === id); return (v && v.name) || "a room"; }).join(" or ");
+    }
+  }
+  if (a.cooldown){
+    const last = crHomeLog.slice().reverse().find((x) => x.whoId === char.id && x.act === a.id);
+    const wait = last ? last.at + a.cooldown * 3600000 - crClockNow() : 0;
+    if (wait > 0){
+      return "again in " + crFmtSpan(wait);
+    }
+  }
+  return "";
+}
+
+// A place the chat's relationship has not reached: no looking in, no dropping in, nobody seen there.
+function crHomeLocked(v: CrSetVariant | undefined) : boolean
+{
+  return !!v && !!v.lock && !crLevelReaches(chatSettings.intimacy, v.lock);
+}
+
+function crHomeFill(text: string, who: Character) : string
+{
+  const user = crLiveUser();
+  return text.replace(/\{\{char\}\}/g, who.name || "them").replace(/\{\{user\}\}/g, (user && user.name) || "you");
+}
+
 async function crHomeSaveStoryState() : Promise<void>
 {
   try{
@@ -5887,16 +6165,26 @@ async function crHomeDoAction(char: Character, actionId: string) : Promise<void>
   if (!a){
     return;
   }
+  const why = crHomeActionGate(char, a);
+  if (why){
+    try{ await api.v1.ui.toast((a.name || "That") + ": " + why + ".", { type: "info", autoClose: 2500 }); }
+    catch (e){}
+    return;
+  }
   const now = crClockNow();
-  const row = crNeedsState[char.id] || {};
+  const row = crCareSnapshot(char, now);
   crNeedsOf(char).forEach((n) => {
     const d = a.effects[n.id];
     if (d){
-      row[n.id] = { v: Math.max(0, Math.min(n.max, crNeedValue(char.id, n) + d)), at: now };
+      row[n.id] = { v: Math.max(0, Math.min(n.max, row[n.id].v + d)), at: now };
     }
   });
+  const cfg = crBondOf(char);
+  if (cfg && a.bond && row[CR_BOND_ID]){
+    row[CR_BOND_ID] = { v: Math.max(0, Math.min(cfg.max, row[CR_BOND_ID].v + a.bond)), at: now };
+  }
   crNeedsState[char.id] = row;
-  crHomeLog.push({ id: crShortId("h"), whoId: char.id, action: a.name || "Action", at: now, text: "", sent: false });
+  crHomeLog.push({ id: crShortId("h"), whoId: char.id, action: a.name || "Action", at: now, text: "", sent: false, act: a.id });
   crHomeLog = crHomeLog.slice(-CR_HOME_LOG_MAX);
   await crHomeSaveStoryState();
   if (a.set){
@@ -5911,8 +6199,9 @@ async function crHomeSetNeed(char: Character, needId: string, v: number) : Promi
   if (!n){
     return;
   }
-  const row = crNeedsState[char.id] || {};
-  row[n.id] = { v: Math.max(0, Math.min(n.max, v)), at: crClockNow() };
+  const now = crClockNow();
+  const row = crCareSnapshot(char, now);
+  row[n.id] = { v: Math.max(0, Math.min(n.max, v)), at: now };
   crNeedsState[char.id] = row;
   await crHomeSaveStoryState();
   crTouch();
@@ -5976,7 +6265,9 @@ async function crHomeReact(itemId: string) : Promise<void>
     const built = await crGroupAssemble(who, probe, true);
     // The needs go in the frame line unless they are already in the context as a brain.
     const needs = (crHomeOn && crHomeNeedsLine) ? "" : crNeedsText(who);
-    const said = item.kind === "away" ? crHomeAwayLine(item, who) : (crHomeActionLine(item, who) + (needs ? " " + needs : ""));
+    const said = item.kind === "away" ? crHomeAwayLine(item, who)
+      : (item.kind === "step" ? crHomeFill((item.lines || [])[0] || "", who) + (needs ? " " + needs : "")
+      : (crHomeActionLine(item, who) + (needs ? " " + needs : "")));
     const messages = crRpgFrame(built, "[ Home: " + said + " ]");
     const member = crGroup.members.indexOf(who.id) >= 0 && chatSettings.char.id !== who.id;
     const raw = member ? await crGroupGenerate(who.id, messages, params, probe) : await crGroupRunLocal(messages, params, probe);
@@ -6054,6 +6345,13 @@ const CR_HOME_SEEN_EVERY_MS = 5 * 60000;
 
 function crNeedValueAt(charId: string, n: CrNeed, ms: number) : number
 {
+  const char = charList.find((c) => c.id === charId);
+  if (char){
+    const v = crCareAt(char, ms).needs[n.id];
+    if (typeof v === "number"){
+      return v;
+    }
+  }
   const st = crNeedsState[charId] ? crNeedsState[charId][n.id] : undefined;
   if (!st){
     return n.max;
@@ -6122,6 +6420,14 @@ function crHomeTally(fromMs: number, toMs: number) : string[]
     });
     if (fell.length){
       out.push((c.name || "They") + "'s needs: " + fell.join(", ") + ".");
+    }
+    const cfg = crBondOf(c);
+    if (cfg && chatSettings.char && chatSettings.char.id === c.id){
+      const a = crCareAt(c, fromMs).bond;
+      const b = crCareAt(c, toMs).bond;
+      if (Math.abs(a - b) >= 1){
+        out.push((c.name || "They") + "'s " + (cfg.name || "bond") + ": " + String(Math.round(a)) + " → " + String(Math.round(b)) + "/" + String(cfg.max) + ".");
+      }
     }
   });
   return out.slice(0, 24);
@@ -6602,11 +6908,13 @@ function crMigrateActivities(list: any[]) : boolean
 function crHomeUserRoom(rooms: CrBrainSet, scenarioId: string) : string
 {
   const pin = crSetActive[rooms.id];
-  if (pin && rooms.variants.some((v) => v.id === pin)){
+  if (pin && rooms.variants.some((v) => v.id === pin) && !crHomeLocked(rooms.variants.find((v) => v.id === pin))){
     return pin;
   }
   const contact = crLiveContact();
-  return contact ? crHomePlace(contact, rooms, scenarioId).room : rooms.variants[0].id;
+  const room = contact ? crHomePlace(contact, rooms, scenarioId).room : rooms.variants[0].id;
+  // A place the relationship has not reached: the User is not in there with them (D-127).
+  return crHomeLocked(rooms.variants.find((v) => v.id === room)) ? "" : room;
 }
 
 function crHomePresence(speaker: Character, rooms: CrBrainSet, scenarioId: string, room: string) : string
@@ -6775,6 +7083,53 @@ function crSetIsOff(cardId: string, set: CrBrainSet) : boolean
   return crBrainIsOff(cardId, "s:" + set.id);
 }
 
+// [CR-SETS] D-126: relationship levels are a ladder — a level reaches everything gated at it or below it
+// (stranger < acquaintance < close < romantic), across conditional brains, schedule lines, Home's places and actions.
+const CR_LADDER: string[] = ["stranger", "acquaintance", "close", "romantic"];
+
+function crLevelReaches(have: string, need: string | undefined) : boolean
+{
+  if (!need || need === "none" || need === have){
+    return true;
+  }
+  const a = CR_LADDER.indexOf(have);
+  const b = CR_LADDER.indexOf(need);
+  return a >= 0 && b >= 0 && a >= b;
+}
+
+function crLevelLabel(need: string) : string
+{
+  return need === "none" ? "none" : (need === "romantic" ? "romantic" : need + " and up");
+}
+
+// AnotherRoom gates on an exact match. The kernel is left as it is and handed a view in which an entry the
+// ladder reaches reads as ungated; an entry above the chat's level keeps its gate, so AR still skips it.
+function crLadderOpen(req: any) : boolean
+{
+  return typeof req === "string" && req !== "none" && req !== chatSettings.intimacy && crLevelReaches(chatSettings.intimacy, req);
+}
+
+function crLadderSchedule(card: any) : any
+{
+  const sched = card ? card.schedule : undefined;
+  if (!sched || typeof sched !== "object"){
+    return undefined;
+  }
+  let hit = false;
+  const out: any = {};
+  Object.keys(sched).forEach((d) => {
+    const list: any[] = Array.isArray(sched[d]) ? sched[d] : [];
+    out[d] = list.map((e: any) => {
+      if (e && crLadderOpen(e.requiredIntimacy)){
+        hit = true;
+        return Object.assign({}, e, { requiredIntimacy: "none" });
+      }
+      return e;
+    });
+  });
+  return hit ? out : undefined;
+}
+
 function crBrainView(card: any) : any
 {
   if (!card){
@@ -6783,7 +7138,10 @@ function crBrainView(card: any) : any
   const sets = crCardSets(card).filter((s) => !crSetIsOff(card.id, s));
   const off = crBrainsOff[card.id] || [];
   const needs = crNeedsBrain(card);
-  if (!sets.length && !off.length && !needs){
+  const ladderConds = Array.isArray(card.brainsConditional)
+    && card.brainsConditional.some((b: BrainComplexConditional) => crLadderOpen(b.requiredIntimacy));
+  const ladderSched = crLadderSchedule(card);
+  if (!sets.length && !off.length && !needs && !ladderConds && !ladderSched){
     return card;
   }
   const copy: any = Object.assign({}, card);
@@ -6798,7 +7156,11 @@ function crBrainView(card: any) : any
       }
     }
     copy.brainsConditional = conds.filter((b: BrainComplexConditional) =>
-      off.indexOf("c:" + b.name) < 0 && off.indexOf("a:" + b.name) < 0);
+      off.indexOf("c:" + b.name) < 0 && off.indexOf("a:" + b.name) < 0)
+      .map((b: BrainComplexConditional) => crLadderOpen(b.requiredIntimacy) ? Object.assign({}, b, { requiredIntimacy: "none" }) : b);
+  }
+  if (ladderSched){
+    copy.schedule = ladderSched;
   }
   const home = crHomeSpeakerRoom(card);
   for (let i = 0; i < sets.length; i++){
@@ -7239,7 +7601,7 @@ function CrBrainsOwner(props: { card: CrAnyCard; kind: CrCardKind; role: string;
     if (mode === "off"){ state = "suppressed"; }
     else if (mode === "always"){ state = "always on"; tone = "accent"; }
     else if (!props.readsConditional){ state = "not read"; }
-    else if (c.requiredIntimacy && c.requiredIntimacy !== "none" && c.requiredIntimacy !== chatSettings.intimacy){ state = "needs " + c.requiredIntimacy; }
+    else if (c.requiredIntimacy && !crLevelReaches(chatSettings.intimacy, c.requiredIntimacy)){ state = "needs " + crLevelLabel(c.requiredIntimacy); }
     else if (fired && fired.names.indexOf(c.name) >= 0){ state = "fired last build"; tone = "accent"; }
     rows.push(h("div", {
       key: "c" + i,
@@ -11187,8 +11549,8 @@ function CrBrainsTab(props: { card: CrAnyCard; kind: CrCardKind; mobile: boolean
         })),
         h(CrChoice, {
           label: "Needs intimacy",
-          hint: "\"none\" means no requirement at all.",
-          options: REQUIRED_INTIMACY_LIST.map((r) => ({ id: r, label: r })),
+          hint: "\"none\" means no requirement at all. A level also opens it at every level above (D-126).",
+          options: REQUIRED_INTIMACY_LIST.map((r) => ({ id: r, label: crLevelLabel(r) })),
           active: c.requiredIntimacy || "none",
           onPick: (id: string) => { conds[i].requiredIntimacy = id as RequiredIntimacy; commitCond(); }
         }),
@@ -11662,7 +12024,7 @@ function crSchedLive(evt: ScheduleEvent, minutes: number) : boolean
 
 function crSchedGated(evt: ScheduleEvent) : boolean
 {
-  return evt.requiredIntimacy !== "none" && chatSettings.intimacy !== evt.requiredIntimacy;
+  return !crLevelReaches(chatSettings.intimacy, evt.requiredIntimacy);
 }
 
 function crSchedPct(minutes: number) : string
@@ -11714,7 +12076,7 @@ function CrDayStrip(props: {
           title: crFmtHM(p.evt.startTime) + " – " + crFmtHM(p.evt.endTime)
                  + (text ? " · " + text : " · (no text yet)")
                  + (p.wrapped ? " · runs past midnight" : "")
-                 + (gated ? " · needs intimacy: " + p.evt.requiredIntimacy : ""),
+                 + (gated ? " · needs " + crLevelLabel(p.evt.requiredIntimacy) : ""),
           style: {
             position: "absolute", top: String(li * props.laneH + 1) + "px",
             height: String(props.laneH - 2) + "px",
@@ -11852,12 +12214,15 @@ async function crScheduleDelete(char: Character, id: string) : Promise<void>
   }
   const links = Object.assign({}, crSchedLinksOf(char));
   const homes = Object.assign({}, crLineHomeOf(char));
-  if (links[id] || homes[id]){
+  const rates = Object.assign({}, crLineNeedsOf(char));
+  if (links[id] || homes[id] || rates[id]){
     delete links[id];
     delete homes[id];
+    delete rates[id];
     const extra: any = char.cr || {};
     extra.schedLinks = links;
     extra.lineHome = homes;
+    extra.lineNeeds = rates;
     char.cr = crSanitizeContactExtra(extra);
   }
   await crScheduleSave(char);
@@ -11960,12 +12325,13 @@ function CrEventSheet() : any
     }),
     h(CrChoice, {
       label: "Needs intimacy",
-      hint: "The kernel skips an event whose intimacy is not the chat's exactly — this is a match, not a floor.",
-      options: REQUIRED_INTIMACY_LIST.map((r) => ({ id: r, label: r })),
+      hint: "A floor: the event is on at this level and every level above it (D-126).",
+      options: REQUIRED_INTIMACY_LIST.map((r) => ({ id: r, label: crLevelLabel(r) })),
       active: evt.requiredIntimacy || "none",
       onPick: (id: string) => set({ requiredIntimacy: id })
     }),
     crEventHomeChoice(char, evt.id),
+    crEventNeedsChoice(char, evt.id),
     crEventSetChoices(char, evt.id),
     h("div", { style: { display: "flex", gap: CR_S_3, flexWrap: "wrap", paddingTop: CR_S_2 } },
       h(CrButton, { text: "Close", onClick: () => { crCloseEventSheet().catch(() => {}); } }),
@@ -12132,7 +12498,7 @@ function crSchedLinePills(e: ScheduleEvent) : any[]
     out.push(h(CrPill, { key: "on", text: "overnight" }));
   }
   if (e.requiredIntimacy !== "none"){
-    out.push(h(CrPill, { key: "in", text: e.requiredIntimacy, tone: crSchedGated(e) ? "" : "accent" }));
+    out.push(h(CrPill, { key: "in", text: crLevelLabel(e.requiredIntimacy), tone: crSchedGated(e) ? "" : "accent" }));
   }
   return out;
 }
@@ -12834,7 +13200,7 @@ function CrChatSurface(props: { mobile: boolean; tab: string }) : any
 {
   const tab = (props.tab === "stage" || props.tab === "group" || props.tab === "brains" || props.tab === "home") ? props.tab : "chat";
   const strip = h(CrTabs, {
-    tabs: [{ id: "chat", label: "Chat" }, { id: "brains", label: "Brains" }, { id: "home", label: "Home" }, { id: "stage", label: "Stage" }, { id: "group", label: "Group" }],
+    tabs: [{ id: "chat", label: "Chat" }, { id: "brains", label: "Brains" }, { id: "home", label: crHomeBadge() ? "Home ●" : "Home" }, { id: "stage", label: "Stage" }, { id: "group", label: "Group" }],
     active: tab, mobile: props.mobile,
     onPick: (id: string) => crNav({ chatTab: id })
   });
@@ -23243,14 +23609,18 @@ function CrHomeSurface(props: { mobile: boolean }) : any
   const userRoom = crHomeUserRoom(rooms, scenario.id);
   const contactRoom = places[contact.id] ? places[contact.id].room : rooms.variants[0].id;
   const pinned = !!(crSetActive[rooms.id] && rooms.variants.some((v) => v.id === crSetActive[rooms.id]));
-  const view = (crHomeUi.look && rooms.variants.some((v) => v.id === crHomeUi.look)) ? crHomeUi.look
+  const view0 = (crHomeUi.look && rooms.variants.some((v) => v.id === crHomeUi.look)) ? crHomeUi.look
     : (pinned ? userRoom : contactRoom);
+  const view = rooms.variants.some((v) => v.id === view0) ? view0 : contactRoom;
   const roomOf = (id: string) => rooms.variants.find((v) => v.id === id);
   const roomName = (id: string) => { const v = roomOf(id); return (v && v.name) ? v.name : "a room"; };
   const arrange = crHomeUi.arrange;
   const viewRoom = roomOf(view) as CrSetVariant;
   const layers: CrRoomLayer[] = viewRoom.layers || [];
   const picSlot = (rec: CrLineHome | undefined) => (rec && rec.pic) ? crPicSlot(rec.pic) : CR_SLOT_AVATAR;
+  // D-127: a place the relationship has not reached shows nothing but its lock, outside Arrange.
+  const locked = !arrange && crHomeLocked(viewRoom);
+  const shut = (id: string) => !arrange && crHomeLocked(roomOf(id));
 
   type Fig = { k: string; charId: string; slot: string; name: string; x: number; y: number; scale: number };
   const figs: Fig[] = [];
@@ -23280,6 +23650,9 @@ function CrHomeSurface(props: { mobile: boolean }) : any
         ? { k: crHomeKey(c.id, pl.line), charId: c.id, slot: mood(c, pl.spot), name: c.name, x: pl.spot.x, y: pl.spot.y, scale: pl.spot.scale }
         : { k: c.id + "|", charId: c.id, slot: mood(c, undefined), name: c.name, x: (i + 0.5) / here.length * 0.8 + 0.1, y: 0.78, scale: 0.16 });
     });
+  }
+  if (locked){
+    figs.length = 0;
   }
   const selLine = arrange ? crHomeFind(crHomeUi.sel) : undefined;
   const selLayer = arrange ? crHomeFindLayer(crHomeUi.sel) : undefined;
@@ -23316,10 +23689,11 @@ function CrHomeSurface(props: { mobile: boolean }) : any
     style: { position: "relative", width: "100%", aspectRatio: "var(--ce-img-ar, 1 / 1)" }
   },
     h("div", { style: { position: "absolute", inset: "0", display: "grid", placeItems: "center", color: CR_DIM, fontSize: CR_T_SM, padding: CR_S_3, textAlign: "center" } },
-      "No Home picture for " + roomName(view) + " yet — add one on the Scenario's Locations tab."),
-    crImgAnchor(scenario.id, crRoomPicSlot(viewRoom), "fit=cover,collapse=1",
+      locked ? ("🔒 " + roomName(view) + " opens at " + crLevelLabel(viewRoom.lock || "") + ".")
+        : ("No Home picture for " + roomName(view) + " yet — add one on the Scenario's Locations tab.")),
+    locked ? null : crImgAnchor(scenario.id, crRoomPicSlot(viewRoom), "fit=cover,collapse=1",
       { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block", zIndex: "1" }),
-    layers.filter((l) => arrange || crLayerShown(viewRoom, l)).map((l) => h(CrHomeLayer, {
+    layers.filter((l) => !locked && (arrange || crLayerShown(viewRoom, l))).map((l) => h(CrHomeLayer, {
       key: l.id, scenarioId: scenario.id, layer: l, dim: arrange && !crLayerShown(viewRoom, l),
       selected: arrange && crHomeUi.sel === crHomeLayerKey(view, l.id)
     })),
@@ -23340,22 +23714,24 @@ function CrHomeSurface(props: { mobile: boolean }) : any
     }
   }, world);
 
-  const who = (id: string) => cast.filter((c) => places[c.id].room === id).map((c) => c.name).concat(userRoom === id ? ["you"] : []);
+  const who = (id: string) => shut(id) ? [] : cast.filter((c) => places[c.id].room === id).map((c) => c.name).concat(userRoom === id ? ["you"] : []);
   const strip = h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
     rooms.variants.map((v) => {
       const n = who(v.id).length;
       return h(CrButton, {
         key: v.id, icon: "", primary: v.id === view,
-        text: (v.name || "Room") + (n ? "  ·  " + String(n) : ""),
+        text: (shut(v.id) ? "🔒 " : "") + (v.name || "Room") + (n ? "  ·  " + String(n) : ""),
         onClick: () => { crHomeUi.look = v.id; crTouch(); }
       });
     }));
 
   const here = who(view);
-  const atmos = crAtmosLive(viewRoom).map((a) => (a.text || "").trim()).filter(Boolean);
-  const status = (here.length ? ("In " + roomName(view) + ": " + here.join(", ") + ".") : ("Nobody is in " + roomName(view) + "."))
-    + (view !== contactRoom ? "  " + (contact.name || "The Contact") + " is in " + roomName(contactRoom) + "." : "")
-    + (view !== userRoom ? "  You are in " + roomName(userRoom) + "." : "")
+  const atmos = locked ? [] : crAtmosLive(viewRoom).map((a) => (a.text || "").trim()).filter(Boolean);
+  const status = (locked ? (roomName(view) + " is shut to you for now.")
+      : (here.length ? ("In " + roomName(view) + ": " + here.join(", ") + ".") : ("Nobody is in " + roomName(view) + ".")))
+    + (view !== contactRoom ? "  " + (contact.name || "The Contact")
+        + (shut(contactRoom) ? " is somewhere you can't follow yet." : " is in " + roomName(contactRoom) + ".") : "")
+    + (!userRoom ? "  You are not with them." : (view !== userRoom ? "  You are in " + roomName(userRoom) + "." : ""))
     + (atmos.length ? "  " + atmos.join(" ") : "");
 
   const save = (k: string) => { const t = crHomeTarget(k); if (t){ t.save().catch(() => {}); } };
@@ -23509,7 +23885,8 @@ function CrHomeSurface(props: { mobile: boolean }) : any
   // Cast members with needs or actions get a care panel, whoever is in view first.
   const caring = cast.filter((c) => crNeedsOf(c).length || crHomeActionsOf(c).length)
     .sort((a, b) => (places[a.id].room === view ? 0 : 1) - (places[b.id].room === view ? 0 : 1));
-  const care = arrange ? null : caring.map((c) => h(CrHomeCare, { key: "care" + c.id, char: c, where: "in " + roomName(places[c.id].room) }));
+  const care = arrange ? null : caring.map((c) => h(CrHomeCare, { key: "care" + c.id, char: c,
+    where: shut(places[c.id].room) ? "somewhere private" : "in " + roomName(places[c.id].room) }));
 
   return h("div", { class: "cr-home", style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
     h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
@@ -23517,10 +23894,10 @@ function CrHomeSurface(props: { mobile: boolean }) : any
         onClick: () => { crHomeSetOn(!crHomeOn).catch(() => {}); } }),
       h(CrButton, { text: arrange ? "Done arranging" : "Arrange", icon: "", primary: arrange,
         onClick: () => { crHomeUi.arrange = !arrange; crHomeUi.drag = ""; crTouch(); } }),
-      arrange ? null : h(CrButton, { text: "Snapshot", icon: "", onClick: () => crHomeSnapshot(scenario, rooms, view) }),
+      (arrange || locked) ? null : h(CrButton, { text: "Snapshot", icon: "", onClick: () => crHomeSnapshot(scenario, rooms, view) }),
       caring.length ? h(CrButton, { text: crHomeNeedsLine ? "Needs go to the chat" : "Needs stay on Home", icon: "", primary: crHomeNeedsLine,
         onClick: () => { crHomeSetNeedsLine(!crHomeNeedsLine).catch(() => {}); } }) : null,
-      view !== userRoom ? h(CrButton, { text: "Drop in", icon: "",
+      (view !== userRoom && !locked) ? h(CrButton, { text: "Drop in", icon: "",
         onClick: () => { crHomeUi.look = ""; crPickVariant(rooms.id, view).catch(() => {}); } }) : null,
       (crHomeUi.look || pinned) ? h(CrButton, { text: "Follow " + (contact.name || "the Contact"), icon: "",
         onClick: () => { crHomeUi.look = ""; if (pinned){ crUnpinVariant(rooms.id).catch(() => {}); } else { crTouch(); } } }) : null
@@ -23601,12 +23978,20 @@ function CrLocationsTab(props: { scenario: Scenario; mobile: boolean }) : any
                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
           }, (open ? "▾ " : "▸ ") + (v.name || "Unnamed place")
             + (crAtmosLive(v).length ? "  ·  " + crAtmosLive(v).map((a) => a.text || "atmosphere").join(", ") : "")),
+          v.lock ? h(CrPill, { text: "🔒 " + crLevelLabel(v.lock) }) : null,
           (active.v && active.v.id === v.id) ? h(CrPill, { text: "the chat's", tone: "accent" }) : null
         ),
         open ? h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
           h(CrTextInput, { value: v.name, placeholder: "Kitchen", onSet: (x: string) => { v.name = x.slice(0, 80); commit(); } }),
           h(CrTextArea, { value: v.content, placeholder: "What the model should know while the chat is here.", rows: props.mobile ? 4 : 3,
             onSet: (x: string) => { v.content = x.slice(0, 4000); commit(); } }),
+          h(CrChoice, {
+            label: "Open to",
+            hint: "Below this relationship the place is shut on Home: no looking in or dropping in, and nobody is seen there. Arrange still opens it.",
+            options: [{ id: "", label: "Everyone" }].concat(CR_LADDER.slice(1).map((l) => ({ id: l, label: crLevelLabel(l) }))),
+            active: v.lock || "",
+            onPick: (id: string) => { v.lock = id || undefined; commit(); }
+          }),
           h(CrField, { label: "Image prompt", hint: "Draws this place; joins every picture while the chat is here." },
             h(CrTextInput, { value: v.prompt || "", placeholder: "small kitchen, warm light, wooden table",
               onSet: (x: string) => { v.prompt = x.slice(0, 600) || undefined; commit(); } })),
@@ -23726,7 +24111,7 @@ async function crRoutineDelete(char: Character, id: string) : Promise<void>
 async function crRoutineExport(char: Character) : Promise<void>
 {
   const body = { kind: "cr-schedule", version: 1, name: char.name || "", schedule: crScheduleOf(char),
-                 lineHome: crLineHomeOf(char), schedLinks: crSchedLinksOf(char), pics: crPicsOf(char) };
+                 lineHome: crLineHomeOf(char), schedLinks: crSchedLinksOf(char), pics: crPicsOf(char), lineNeeds: crLineNeedsOf(char) };
   try{ await api.v1.file.save((char.name || "contact").replace(/[^A-Za-z0-9 _-]/g, "") + " schedule.json", JSON.stringify(body, null, 2)); }
   catch (e){ api.v1.error("[CR:sched] could not save the schedule file:", e); }
 }
@@ -23756,6 +24141,7 @@ async function crRoutineImport(char: Character) : Promise<void>
   extra.schedPresets = crSchedPresetsOf(char).concat([{ id: crShortId("r"), name: String(data.name || "Imported") + " (file)", schedule: sched }]).slice(0, 12);
   extra.lineHome = Object.assign({}, crSanitizeLineHome(data.lineHome) || {}, crLineHomeOf(char));
   extra.schedLinks = Object.assign({}, crSanitizeSchedLinks(data.schedLinks) || {}, crSchedLinksOf(char));
+  extra.lineNeeds = Object.assign({}, crSanitizeLineNeeds(data.lineNeeds) || {}, crLineNeedsOf(char));
   const have = crPicsOf(char);
   extra.pics = have.concat((crSanitizePics(data.pics) || []).filter((p) => !have.some((x) => x.id === p.id)));
   char.cr = crSanitizeContactExtra(extra);
@@ -23789,16 +24175,23 @@ function CrRoutinesSection(props: { char: Character }) : any
 
 // [CR-HOME] Needs and actions on the Contact (D-124): what they need, how fast it drains, and what can be done for
 // them. How full each need is lives in the story, so another chat starts them full.
-async function crNeedsCommit(char: Character, needs: CrNeed[], actions: CrHomeAction[]) : Promise<void>
+async function crNeedsCommit(char: Character, needs: CrNeed[], actions: CrHomeAction[], bond?: CrBond | null) : Promise<void>
 {
+  // Levels set where they stand under the old numbers, so a changed rate counts from now (D-127).
+  if (crNeedsState[char.id]){
+    crNeedsState[char.id] = crCareSnapshot(char, crClockNow());
+    await crHomeSaveStoryState();
+  }
   const extra: any = char.cr || {};
   extra.needs = needs;
   extra.homeActions = actions;
+  if (bond === null){ delete extra.bond; }
+  else if (bond){ extra.bond = bond; }
   char.cr = crSanitizeContactExtra(extra);
   await crScheduleSave(char);
 }
 
-function crNeedsStarter() : { needs: CrNeed[]; actions: CrHomeAction[] }
+function crNeedsStarter() : { needs: CrNeed[]; actions: CrHomeAction[]; bond: CrBond }
 {
   return {
     needs: [
@@ -23811,8 +24204,10 @@ function crNeedsStarter() : { needs: CrNeed[]; actions: CrHomeAction[] }
       { id: "feed", name: "Feed", effects: { hunger: 40 }, say: "{{user}} brings {{char}} something to eat." },
       { id: "rest", name: "Let them rest", effects: { energy: 50, fun: -5 }, say: "{{user}} lets {{char}} rest for a while." },
       { id: "play", name: "Play", effects: { fun: 35, energy: -10 }, say: "{{user}} plays with {{char}}." },
-      { id: "talk", name: "Talk", effects: { company: 30 }, say: "{{user}} sits down to talk with {{char}}." }
-    ]
+      { id: "talk", name: "Talk", effects: { company: 30 }, say: "{{user}} sits down to talk with {{char}}." },
+      { id: "gift", name: "Give a gift", effects: { company: 10 }, bond: 15, cooldown: 24, say: "{{user}} gives {{char}} a gift." }
+    ],
+    bond: { name: "Bond", max: 100, up: 4, down: 4, upAt: 60, downWhen: "all" }
   };
 }
 
@@ -23821,7 +24216,12 @@ function CrNeedsSection(props: { char: Character }) : any
   const char = props.char;
   const needs: CrNeed[] = JSON.parse(JSON.stringify(crNeedsOf(char)));
   const actions: CrHomeAction[] = JSON.parse(JSON.stringify(crHomeActionsOf(char)));
+  const bond: CrBond | undefined = crBondOf(char) ? JSON.parse(JSON.stringify(crBondOf(char))) : undefined;
   const commit = () => { crNeedsCommit(char, needs, actions).catch(() => {}); };
+  const commitBond = () => { crNeedsCommit(char, needs, actions, bond).catch(() => {}); };
+  const liveScenario = crLiveScenario();
+  const liveRooms = liveScenario ? crHomeRoomsSet(liveScenario) : undefined;
+  const roomOpts = liveRooms ? liveRooms.variants.map((v) => ({ id: v.id, label: v.name || "Unnamed" })) : [];
   const fid = (a: string, b: string) => "need|" + char.id + "|" + a + "|" + b;
   const setOpts: { id: string; label: string }[] = [{ id: "", label: "No change" }];
   crCardSets(char).forEach((s) => s.variants.forEach((v) => {
@@ -23872,21 +24272,64 @@ function CrNeedsSection(props: { char: Character }) : any
         commit();
       }
     }) : null,
+    roomOpts.length ? h(CrField, { label: "Where", hint: "Only while " + (char.name || "they") + " is in one of these places here. None picked: anywhere." },
+      h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_1 } },
+        roomOpts.map((o) => {
+          const on = (a.rooms || []).indexOf(o.id) >= 0;
+          return h(CrButton, { key: o.id, text: o.label, icon: "", primary: on, onClick: () => {
+            const list = (actions[i].rooms || []).filter((x) => x !== o.id);
+            actions[i].rooms = on ? (list.length ? list : undefined) : list.concat([o.id]);
+            commit();
+          } });
+        }))) : null,
+    h(CrChoice, {
+      label: "Open at", options: [{ id: "", label: "Any relationship" }].concat(CR_LADDER.slice(1).map((l) => ({ id: l, label: crLevelLabel(l) }))),
+      active: a.level || "", onPick: (id: string) => { actions[i].level = id || undefined; commit(); }
+    }),
+    h("div", { style: { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: CR_S_2 } },
+      h(CrNumField, { id: fid(a.id, "cd"), label: "Once every (hours)", hint: "0: no wait.", value: a.cooldown || 0,
+        onSet: (v: number) => { actions[i].cooldown = v > 0 ? v : undefined; commit(); } }),
+      bond ? h(CrNumField, { id: fid(a.id, "bd"), label: bond.name || "Bond", hint: "Straight onto the track.", value: a.bond || 0,
+        onSet: (v: number) => { actions[i].bond = v || undefined; commit(); } }) : null),
     h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
       h(CrButton, { text: "Remove", icon: "", onClick: () => { actions.splice(i, 1); commit(); } }))
   ));
 
+  const bondRow = bond ? h("div", {
+    style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, padding: CR_PAD_CTL,
+             border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S }
+  },
+    h(CrField, { label: "Relationship track", hint: "Full, Home offers the chat's relationship one step up; empty, one step down. Nothing changes until you take it." },
+      h(CrTextInput, { value: bond.name, placeholder: "Bond", onSet: (v: string) => { bond.name = v.slice(0, 40); commitBond(); } })),
+    h("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: CR_S_2 } },
+      h(CrNumField, { id: fid("bond", "max"), label: "Full at", value: bond.max, onSet: (v: number) => { bond.max = v; commitBond(); } }),
+      h(CrNumField, { id: fid("bond", "up"), label: "Rises an hour", value: bond.up, onSet: (v: number) => { bond.up = v; commitBond(); } }),
+      h(CrNumField, { id: fid("bond", "down"), label: "Falls an hour", value: bond.down, onSet: (v: number) => { bond.down = v; commitBond(); } })),
+    h(CrNumField, { id: fid("bond", "upAt"), label: "Rises while every need is at least (%)", value: bond.upAt, onSet: (v: number) => { bond.upAt = v; commitBond(); } }),
+    h(CrChoice, {
+      label: "Falls while", options: [{ id: "all", label: "Every need is low" }, { id: "any", label: "Any need is low" }],
+      active: bond.downWhen === "any" ? "any" : "all", onPick: (id: string) => { bond.downWhen = id; commitBond(); }
+    }),
+    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
+      h(CrButton, { text: "Remove the track", icon: "", onClick: () => { crNeedsCommit(char, needs, actions, null).catch(() => {}); } }))
+  ) : (needs.length ? h("div", null,
+    h(CrButton, { text: "Add a relationship track", icon: "", onClick: () => {
+      crNeedsCommit(char, needs, actions, { name: "Bond", max: 100, up: 4, down: 4, upAt: 60, downWhen: "all" }).catch(() => {});
+    } })) : null);
+
   return h(CrSection, {
     title: "Needs and actions",
     note: "For Home: what " + (char.name || "they") + " needs, how much it drops each hour of the chat clock, and what you "
-      + "can do about it. Each chat keeps its own levels, full to start. Effects add to a need, or take from it below zero."
+      + "can do about it. Each chat keeps its own levels, full the first time Home shows them. Effects add to a need, or take "
+      + "from it below zero. A schedule line can change a need while it is on (its sheet, Needs while this is on)."
   }, h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
     (!needs.length && !actions.length) ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
-      h(CrButton, { text: "Start with Hunger, Energy, Fun and Company", icon: "", onClick: () => {
+      h(CrButton, { text: "Start with Hunger, Energy, Fun, Company and a Bond", icon: "", onClick: () => {
         const kit = crNeedsStarter();
-        crNeedsCommit(char, kit.needs, kit.actions).catch(() => {});
+        crNeedsCommit(char, kit.needs, kit.actions, kit.bond).catch(() => {});
       } })) : null,
     needRows,
+    bondRow,
     needs.length < CR_NEED_MAX ? h("div", null,
       h(CrButton, { text: "Add a need", icon: "", onClick: () => {
         needs.push({ id: crShortId("n"), name: "", max: 100, decay: 5, low: 25 });
@@ -23931,30 +24374,48 @@ function CrHomeAway() : any
   ));
 }
 
-// [CR-HOME] Home's care panel for one cast member: their needs as meters, the actions, and what was done lately with
-// a reaction to ask for and send.
+// [CR-HOME] Home's care panel for one cast member: their needs as meters, the relationship track with its step when
+// one is ready, the actions (each says why it is shut when it is), and what was done lately with a reaction to send.
 function CrHomeCare(props: { char: Character; where: string }) : any
 {
   const char = props.char;
+  crCareSeed(char);
   const needs = crNeedsOf(char);
   const actions = crHomeActionsOf(char);
+  const cfg = crBondOf(char);
+  const paired = !!(chatSettings.char && chatSettings.char.id === char.id);
+  const cur = crCareAt(char, crClockNow());
+  const step = crBondStep(char);
   const log = crHomeLog.filter((x) => x.whoId === char.id && x.kind !== "away").slice(-3).reverse();
   const busy = !!crHomeBusy || !!crGroupBusyId;
+  const meter = (key: string, label: string, v: number, max: number, warn: boolean) =>
+    h("div", { key: key, style: { display: "grid", gridTemplateColumns: "minmax(64px, 30%) 1fr auto", gap: CR_S_2, alignItems: "center" } },
+      h("div", { style: { color: warn ? CR_WARN : CR_TEXT, fontSize: CR_T_SM, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, label),
+      h(CrMeter, { value: v, max: max, colour: warn ? CR_WARN : CR_ACCENT, look: "bar" }),
+      h("div", { style: { color: CR_DIM, fontSize: CR_T_XS, minWidth: "48px", textAlign: "right" } }, String(Math.round(v)) + "/" + String(max)));
   return h(CrSection, {
     title: (char.name || "Unnamed") + (props.where ? "  ·  " + props.where : ""),
     note: ""
   }, h("div", { style: { marginTop: CR_S_2, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2 } },
-    needs.map((n) => {
-      const v = crNeedValue(char.id, n);
-      const low = v <= n.low;
-      return h("div", { key: n.id, style: { display: "grid", gridTemplateColumns: "minmax(64px, 30%) 1fr auto", gap: CR_S_2, alignItems: "center" } },
-        h("div", { style: { color: low ? CR_WARN : CR_TEXT, fontSize: CR_T_SM, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, n.name || "Need"),
-        h(CrMeter, { value: v, max: n.max, colour: low ? CR_WARN : CR_ACCENT, look: "bar" }),
-        h("div", { style: { color: CR_DIM, fontSize: CR_T_XS, minWidth: "48px", textAlign: "right" } }, String(Math.round(v)) + "/" + String(n.max)));
-    }),
+    needs.map((n) => meter(n.id, n.name || "Need", cur.needs[n.id], n.max, cur.needs[n.id] <= n.low)),
+    (cfg && paired) ? meter(CR_BOND_ID, (cfg.name || "Bond") + "  ·  " + chatSettings.intimacy, cur.bond, cfg.max, cur.bond <= 0) : null,
+    step.dir ? h("div", {
+      class: "cr-home-step",
+      style: { display: "flex", gap: CR_S_2, alignItems: "center", flexWrap: "wrap", padding: CR_PAD_CTL,
+               border: CR_LINE_W + " solid " + (step.dir === "up" ? CR_ACCENT : CR_WARN), borderRadius: CR_RADIUS_S }
+    },
+      h(CrPill, { text: step.dir === "up" ? "Ready" : "Slipping", tone: step.dir === "up" ? "accent" : "warn" }),
+      h("div", { style: { flex: "1 1 160px", minWidth: "0", color: CR_TEXT, fontSize: CR_T_SM } },
+        step.dir === "up" ? ((char.name || "They") + " would count you as " + step.to + " now.")
+                          : ((char.name || "They") + " is cooling toward you. Back to " + step.to + "?")),
+      h(CrButton, { text: step.dir === "up" ? "Become " + step.to : "Go back to " + step.to, icon: "", primary: step.dir === "up",
+        onClick: () => { crBondTakeStep(char).catch(() => {}); } })) : null,
     actions.length ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
-      actions.map((a) => h(CrButton, { key: a.id, text: a.name || "Action", icon: "",
-        onClick: () => { crHomeDoAction(char, a.id).catch(() => {}); } }))) : null,
+      actions.map((a) => {
+        const why = crHomeActionGate(char, a);
+        return h(CrButton, { key: a.id, text: (a.name || "Action") + (why ? "  ·  " + why : ""), icon: "", disabled: !!why,
+          onClick: () => { crHomeDoAction(char, a.id).catch(() => {}); } });
+      })) : null,
     log.map((item) => h("div", { key: item.id, style: { display: "grid", gap: CR_S_1 } },
       h("div", { style: { display: "flex", gap: CR_S_2, alignItems: "center", flexWrap: "wrap" } },
         h("div", { style: { flex: "1 1 120px", minWidth: "0", color: CR_DIM, fontSize: CR_T_SM } }, crFmtStamp(item.at) + "  " + item.action),
@@ -23965,6 +24426,45 @@ function CrHomeCare(props: { char: Character; where: string }) : any
           onClick: () => { crHomeSendReaction(item.id).catch(() => {}); } }) : null),
       item.text ? h("div", { style: { color: item.sent ? CR_DIM : CR_TEXT, fontSize: CR_T_SM, lineHeight: "1.45", whiteSpace: "pre-wrap" } }, item.text) : null))
   ));
+}
+
+// [CR-HOME] The event sheet's needs part (D-127): how each need moves an hour while this line is on.
+function crEventNeedsChoice(char: Character, eventId: string) : any
+{
+  const needs = crNeedsOf(char);
+  if (!needs.length){
+    return null;
+  }
+  const row = crLineNeedsOf(char)[eventId] || {};
+  return h(CrField, {
+    label: "Needs while this is on",
+    hint: "An hour's change while this line is on, in place of the need's own drop: sleep refills Energy, a meal Hunger. "
+      + "Below zero drains it faster; the need's own drop is the default."
+  }, h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: CR_S_2, marginTop: CR_S_1 } },
+    needs.map((n) => h(CrNumField, {
+      key: n.id, id: "ln|" + char.id + "|" + eventId + "|" + n.id, label: n.name || "Need",
+      value: typeof row[n.id] === "number" ? row[n.id] : -n.decay,
+      onSet: (v: number) => { crLineNeedsSet(char, eventId, n.id, v === -n.decay ? undefined : v).catch(() => {}); }
+    }))));
+}
+
+async function crLineNeedsSet(char: Character, eventId: string, needId: string, v: number | undefined) : Promise<void>
+{
+  const all: Record<string, Record<string, number>> = JSON.parse(JSON.stringify(crLineNeedsOf(char)));
+  const row = all[eventId] || {};
+  if (v === undefined){ delete row[needId]; }
+  else { row[needId] = v; }
+  if (Object.keys(row).length){ all[eventId] = row; }
+  else { delete all[eventId]; }
+  // The levels are set where they stand first, so the new rate counts from now and not backwards.
+  if (crNeedsState[char.id]){
+    crNeedsState[char.id] = crCareSnapshot(char, crClockNow());
+    await crHomeSaveStoryState();
+  }
+  const extra: any = char.cr || {};
+  extra.lineNeeds = all;
+  char.cr = crSanitizeContactExtra(extra);
+  await crScheduleSave(char);
 }
 
 // [CR-HOME] The event sheet's Home part: in the paired Scenario, which place this line happens in and with which
