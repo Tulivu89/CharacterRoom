@@ -3,8 +3,8 @@ compatibilityVersion: naiscript-1.0
 id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
-updatedAt: 1793020000000
-version: 1.0.19
+updatedAt: 1793030000000
+version: 1.0.20
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.19. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.20. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -69,15 +69,19 @@ SECTIONS (search "SECTION <NAME>")
               Schedule tab's row (CrLineRow, in CR-UI); needs and actions (CrHomeCare on Home, CrNeedsSection on
               Schedule): a Contact's needs drain on the chat clock, actions change them, pick a set version, and log
               for a reaction (crHomeReact / crHomeSendReaction, the Games React path). With Home on, a speaker is told
-              only their room (crHomeSpeakerRoom, in crBrainView), and low needs as a Needs brain when asked
-              (crNeedsBrain). D-127: places locked below a relationship (variant.lock, crHomeLocked); schedule lines
+              only their room (crHomeSpeakerRoom, in crBrainView), and every need where it stands as a Needs brain
+              (crNeedsBrain, 1.0.20). D-127: places locked below a relationship (variant.lock, crHomeLocked); schedule lines
               that move needs while on (cr.lineNeeds); a relationship track (cr.bond) that offers a step up or down
               (crBondStep, the Home tab's dot); actions limited by place, level and a wait, or aimed at the track;
               levels read by replaying the chat clock (crCareAt). D-128: a need's note (how this character shows
               it) rides the Needs line; a weekday line outranks a Daily one (crStatusRead order). While you were away (CrHomeAway): a gap in the clock — Clock panel draft and Set the
               clock (crClockApplyDraft), or real time with the story closed (crHomeAwayInit, onScriptsLoaded) — is
-              tallied (crHomeTally) and logged for Catch up; Snapshot hands the room to Illustrate. Place logic, needs
-              state, the tally and the cr.home switch sit in CR-SETS
+              tallied (crHomeTally) and logged for Catch up; Snapshot hands the room to Illustrate. 1.0.20 (D-129): Home
+              as a game screen — the clock bar (CrClockBar, shared with the Chat tab's Clock; crClockParse reads Go to),
+              an on/off switch (CrSwitch), room tiles (CrHomeRoomTile), a card per person (CrHomeCare) with Call here
+              (crHomeCall / crHomeRelease, cr.homeCall, honoured first in crHomePlace), action tiles, what exactly
+              (a log item's detail, crHomeDetailLine) and Reset (crHomeResetCare). Place logic, needs state, calls, the
+              tally and the cr.home switch sit in CR-SETS
   MACRO-UI    macro list
   SCENARIO / USER / CONTACT   card templates, save, export; smart import (every Import button)
   BUBBLES     markdown helpers, response parser
@@ -98,7 +102,8 @@ STORAGE
            floatyBrainsKey floatyBrainsStateKey floatyActiveIdsKey floatyInactiveIdsKey
            diaryBrainsRecordKey actionPlansRecordKey forumThreadsRecordKey
            emotionalMemoryRecordKey continuityCreationRecordKey cr.clockMode cr.clockStep
-           cr.group cr.rpg cr.brainsOff cr.home {on, needsLine} cr.needs cr.homeLog cr.homeSeen
+           cr.group cr.rpg cr.brainsOff cr.home {on} cr.needs cr.homeLog cr.homeSeen
+           cr.homeCall
   history  cr.clock (undo rewinds the chat clock), cr.setActive (and the variant in use)
   temp     lastCropValuesTempKey, game display keys
 
@@ -5700,7 +5705,7 @@ catch (e){ api.v1.error("[CR:home] could not read the Home switch:", e); }
 async function crHomeSetOn(on: boolean) : Promise<void>
 {
   crHomeOn = on === true;
-  try{ await api.v1.storyStorage.set(CR_HOME_KEY, { on: crHomeOn, needsLine: crHomeNeedsLine }); }
+  try{ await api.v1.storyStorage.set(CR_HOME_KEY, { on: crHomeOn }); }
   catch (e){ api.v1.error("[CR:home] could not store the Home switch:", e); }
   crTouch();
 }
@@ -5711,24 +5716,28 @@ async function crHomeSetOn(on: boolean) : Promise<void>
 // and of any reactions asked for, is the story's too ("cr.homeLog").
 const CR_NEEDS_KEY = "cr.needs";
 const CR_HOME_LOG_KEY = "cr.homeLog";
+// 1.0.20: a Contact called to a room stays there until the schedule line that was on when called ends
+// ({charId: {scenarioId, room, line, at}}).
+const CR_HOME_CALL_KEY = "cr.homeCall";
+const CR_HOME_CALL_MAX_MS = 12 * 3600000;
 const CR_NEED_MAX = 8;
 const CR_HOME_ACTION_MAX = 12;
 const CR_HOME_LOG_MAX = 40;
 
 type CrNeedState = Record<string, Record<string, { v: number; at: number }>>;
 type CrHomeLogItem = { id: string; whoId: string; action: string; at: number; text: string; sent: boolean;
-                       kind?: string; from?: number; lines?: string[]; dismissed?: boolean; act?: string };
+                       kind?: string; from?: number; lines?: string[]; dismissed?: boolean; act?: string; detail?: string };
+type CrHomeCall = { scenarioId: string; room: string; line: string; at: number };
 
 let crNeedsState: CrNeedState = {};
 let crHomeLog: CrHomeLogItem[] = [];
-let crHomeNeedsLine = false;
+let crHomeCalls: Record<string, CrHomeCall> = {};
 try{
   const ns: any = await api.v1.storyStorage.get(CR_NEEDS_KEY);
   crNeedsState = crSanitizeNeedsState(ns);
   const lg: any = await api.v1.storyStorage.get(CR_HOME_LOG_KEY);
   crHomeLog = crSanitizeHomeLog(lg);
-  const hv: any = await api.v1.storyStorage.get(CR_HOME_KEY);
-  crHomeNeedsLine = !!(hv && hv.needsLine === true);
+  crHomeCalls = crSanitizeHomeCalls(await api.v1.storyStorage.get(CR_HOME_CALL_KEY));
 }
 catch (e){ api.v1.error("[CR:home] could not read the needs:", e); }
 
@@ -5764,8 +5773,9 @@ function crSanitizeHomeLog(v: any) : CrHomeLogItem[]
     const item: CrHomeLogItem = { id: x.id, whoId: x.whoId, action: String(x.action || "").slice(0, 80), at: Number(x.at) || 0,
                                   text: String(x.text || "").slice(0, 4000), sent: x.sent === true };
     if (typeof x.act === "string" && /^[A-Za-z0-9_-]{1,24}$/.test(x.act)){ item.act = x.act; }
-    if (x.kind === "step"){
-      item.kind = "step";
+    if (typeof x.detail === "string" && x.detail.trim()){ item.detail = x.detail.trim().slice(0, 300); }
+    if (x.kind === "step" || x.kind === "call"){
+      item.kind = x.kind;
       item.lines = Array.isArray(x.lines) ? x.lines.filter((l: any) => typeof l === "string").slice(0, 2).map((l: string) => l.slice(0, 300)) : [];
     }
     if (x.kind === "away"){
@@ -5776,6 +5786,23 @@ function crSanitizeHomeLog(v: any) : CrHomeLogItem[]
     }
     return item;
   });
+}
+
+function crSanitizeHomeCalls(v: any) : Record<string, CrHomeCall>
+{
+  const out: Record<string, CrHomeCall> = {};
+  if (!v || typeof v !== "object"){
+    return out;
+  }
+  Object.keys(v).slice(0, 64).forEach((cid) => {
+    const r = v[cid];
+    const at = Number(r && r.at);
+    if (r && typeof r.scenarioId === "string" && typeof r.room === "string" && /^[A-Za-z0-9_-]{1,32}$/.test(r.room)
+        && typeof r.line === "string" && r.line.length <= 64 && isFinite(at)){
+      out[cid] = { scenarioId: r.scenarioId.slice(0, 64), room: r.room, line: r.line, at: at };
+    }
+  });
+  return out;
 }
 
 function crSanitizeNeeds(v: any) : CrNeed[] | undefined
@@ -5888,13 +5915,31 @@ function crNeedsText(char: Character) : string
     + (n.note ? " (" + crHomeFill(n.note, char) + ")" : "")).join(", ") + " — running low.";
 }
 
-// D-124: with Home on and Needs in the chat on, a speaking Contact with a low need carries one more brain.
+// Every need where it stands now, the low ones flagged with their note: "Kat's needs right now: Hunger 18/100
+// (low — raids Sam's plate), Energy 70/100."
+function crNeedsStateText(char: Character) : string
+{
+  const needs = crNeedsOf(char);
+  if (!needs.length){
+    return "";
+  }
+  const cur = crCareAt(char, crClockNow());
+  return (char.name || "They") + "'s needs right now: " + needs.map((n) => {
+    const v = typeof cur.needs[n.id] === "number" ? cur.needs[n.id] : n.max;
+    const low = v <= n.low;
+    return (n.name || "Need") + " " + Math.round(v) + "/" + n.max
+      + (low ? " (low" + (n.note ? " \u2014 " + crHomeFill(n.note, char) : "") + ")" : "");
+  }).join(", ") + ".";
+}
+
+// D-124, 1.0.20: with Home on, a speaking Contact with needs carries them as one more brain, every need where it
+// stands now. Off, nothing changes.
 function crNeedsBrain(card: any) : BrainEntry | undefined
 {
-  if (!crHomeOn || !crHomeNeedsLine || !card || !charList.some((c) => c.id === card.id)){
+  if (!crHomeOn || !card || !charList.some((c) => c.id === card.id)){
     return undefined;
   }
-  const text = crNeedsText(card as Character);
+  const text = crNeedsStateText(card as Character);
   return text ? { name: "Needs", content: text } : undefined;
 }
 
@@ -6149,21 +6194,15 @@ async function crHomeSaveStoryState() : Promise<void>
   try{
     await api.v1.storyStorage.set(CR_NEEDS_KEY, crNeedsState);
     await api.v1.storyStorage.set(CR_HOME_LOG_KEY, { items: crHomeLog });
+    await api.v1.storyStorage.set(CR_HOME_CALL_KEY, crHomeCalls);
   }
   catch (e){ api.v1.error("[CR:home] could not store the needs:", e); }
 }
 
-async function crHomeSetNeedsLine(on: boolean) : Promise<void>
-{
-  crHomeNeedsLine = on === true;
-  try{ await api.v1.storyStorage.set(CR_HOME_KEY, { on: crHomeOn, needsLine: crHomeNeedsLine }); }
-  catch (e){ api.v1.error("[CR:home] could not store the Home switch:", e); }
-  crTouch();
-}
-
 // An action: its effects on needs (from where each stands now), an optional set version pinned for the story,
-// and an entry in the log. No generation — a reaction is its own press.
-async function crHomeDoAction(char: Character, actionId: string) : Promise<void>
+// and an entry in the log. No generation — a reaction is its own press. detail: what the User wrote under the
+// actions (1.0.20), carried into the reaction's line.
+async function crHomeDoAction(char: Character, actionId: string, detail?: string) : Promise<void>
 {
   const a = crHomeActionsOf(char).find((x) => x.id === actionId);
   if (!a){
@@ -6188,12 +6227,84 @@ async function crHomeDoAction(char: Character, actionId: string) : Promise<void>
     row[CR_BOND_ID] = { v: Math.max(0, Math.min(cfg.max, row[CR_BOND_ID].v + a.bond)), at: now };
   }
   crNeedsState[char.id] = row;
-  crHomeLog.push({ id: crShortId("h"), whoId: char.id, action: a.name || "Action", at: now, text: "", sent: false, act: a.id });
+  const item: CrHomeLogItem = { id: crShortId("h"), whoId: char.id, action: a.name || "Action", at: now, text: "", sent: false, act: a.id };
+  const d = String(detail || "").trim().slice(0, 300);
+  if (d){ item.detail = d; }
+  crHomeLog.push(item);
   crHomeLog = crHomeLog.slice(-CR_HOME_LOG_MAX);
   await crHomeSaveStoryState();
   if (a.set){
     await crPickVariant(a.set.setId, a.set.variantId);
   }
+  crTouch();
+}
+
+// [CR-HOME] 1.0.20: Call — the User calls a Contact to the room in view. They stay there until the schedule line
+// that was on when called ends (or 12 hours, or Let them go); the call is logged for a reaction like an action.
+function crHomeTopLine(char: Character) : string
+{
+  const live = crStatusRead(char).live;
+  return live.length ? live[0].id : "";
+}
+
+function crHomeCallOf(char: Character, scenarioId: string) : CrHomeCall | undefined
+{
+  const c = crHomeCalls[char.id];
+  if (!c || c.scenarioId !== scenarioId){
+    return undefined;
+  }
+  const now = crClockNow();
+  if (now < c.at || now - c.at > CR_HOME_CALL_MAX_MS || crHomeTopLine(char) !== c.line){
+    return undefined;
+  }
+  return c;
+}
+
+async function crHomeCall(char: Character, scenario: Scenario, roomId: string, detail?: string) : Promise<void>
+{
+  const rooms = crHomeRoomsSet(scenario);
+  const room = rooms ? rooms.variants.find((v) => v.id === roomId) : undefined;
+  if (!rooms || !room || crHomeLocked(room)){
+    return;
+  }
+  const now = crClockNow();
+  crHomeCalls[char.id] = { scenarioId: scenario.id, room: roomId, line: crHomeTopLine(char), at: now };
+  const item: CrHomeLogItem = { id: crShortId("h"), whoId: char.id, action: "Called to " + (room.name || "a room"), at: now,
+                                text: "", sent: false, kind: "call",
+                                lines: ["{{user}} calls {{char}} to " + (room.name || "the room") + ", and {{char}} comes."] };
+  const d = String(detail || "").trim().slice(0, 300);
+  if (d){ item.detail = d; }
+  crHomeLog.push(item);
+  crHomeLog = crHomeLog.slice(-CR_HOME_LOG_MAX);
+  await crHomeSaveStoryState();
+  crTouch();
+}
+
+async function crHomeRelease(char: Character) : Promise<void>
+{
+  if (!crHomeCalls[char.id]){
+    return;
+  }
+  delete crHomeCalls[char.id];
+  await crHomeSaveStoryState();
+  crTouch();
+}
+
+// [CR-HOME] 1.0.20: start a Contact's care over — every need full from now, every action's wait cleared, any call
+// let go. The relationship track keeps where it stands.
+async function crHomeResetCare(char: Character) : Promise<void>
+{
+  const now = crClockNow();
+  const keep = crBondOf(char) ? crCareAt(char, now).bond : NaN;
+  const row: Record<string, { v: number; at: number }> = {};
+  crNeedsOf(char).forEach((n) => { row[n.id] = { v: n.max, at: now }; });
+  if (crBondOf(char) && isFinite(keep)){
+    row[CR_BOND_ID] = { v: keep, at: now };
+  }
+  crNeedsState[char.id] = row;
+  crHomeLog.forEach((x) => { if (x.whoId === char.id && x.act){ delete x.act; } });
+  delete crHomeCalls[char.id];
+  await crHomeSaveStoryState();
   crTouch();
 }
 
@@ -6213,10 +6324,19 @@ async function crHomeSetNeed(char: Character, needId: string, v: number) : Promi
 
 function crHomeActionLine(item: CrHomeLogItem, who: Character) : string
 {
-  const a = crHomeActionsOf(who).find((x) => x.name === item.action);
+  const a = (item.act ? crHomeActionsOf(who).find((x) => x.id === item.act) : undefined)
+    || crHomeActionsOf(who).find((x) => x.name === item.action);
   const user = crLiveUser();
   const said = (a && a.say) ? a.say : ("{{user}} does this for {{char}}: " + item.action + ".");
-  return said.replace(/\{\{char\}\}/g, who.name || "them").replace(/\{\{user\}\}/g, (user && user.name) || "you");
+  return said.replace(/\{\{char\}\}/g, who.name || "them").replace(/\{\{user\}\}/g, (user && user.name) || "you")
+    + crHomeDetailLine(item);
+}
+
+// 1.0.20: what the User wrote under the actions — the food, the game, the words — rides the action's line.
+function crHomeDetailLine(item: CrHomeLogItem) : string
+{
+  const d = (item.detail || "").trim();
+  return d ? " Specifically: " + d + (/[.!?\u2026"')\]]$/.test(d) ? "" : ".") : "";
 }
 
 function crHomeAwayLine(item: CrHomeLogItem, who: Character) : string
@@ -6267,10 +6387,10 @@ async function crHomeReact(itemId: string) : Promise<void>
   const probe = crGroupNewProbe(who.id);
   try{
     const built = await crGroupAssemble(who, probe, true);
-    // The needs go in the frame line unless they are already in the context as a brain.
-    const needs = (crHomeOn && crHomeNeedsLine) ? "" : crNeedsText(who);
+    // The needs go in the frame line unless they are already in the context as a brain (Home on).
+    const needs = crHomeOn ? "" : crNeedsText(who);
     const said = item.kind === "away" ? crHomeAwayLine(item, who)
-      : (item.kind === "step" ? crHomeFill((item.lines || [])[0] || "", who) + (needs ? " " + needs : "")
+      : ((item.kind === "step" || item.kind === "call") ? crHomeFill((item.lines || [])[0] || "", who) + crHomeDetailLine(item) + (needs ? " " + needs : "")
       : (crHomeActionLine(item, who) + (needs ? " " + needs : "")));
     const messages = crRpgFrame(built, "[ Home: " + said + " ]");
     const member = crGroup.members.indexOf(who.id) >= 0 && chatSettings.char.id !== who.id;
@@ -6834,6 +6954,14 @@ type CrHomePlace = { room: string; spot?: CrLineHome; line: string; why: string 
 function crHomePlace(char: Character, rooms: CrBrainSet, scenarioId: string) : CrHomePlace
 {
   const inRooms = (id: string) => rooms.variants.some((v) => v.id === id);
+  // 1.0.20: called to a room — there, at the nothing-on spot if it is in that room, with its picture either way.
+  const call = crHomeCallOf(char, scenarioId);
+  if (call && inRooms(call.room)){
+    const idle = crHomeIdleOf(char)[scenarioId];
+    const spot: CrLineHome = (idle && idle.room === call.room) ? idle
+      : { room: call.room, x: 0.5, y: 0.62, scale: idle ? idle.scale : 0.25, pic: idle ? idle.pic : undefined };
+    return { room: call.room, spot: spot, line: CR_HOME_CALLED, why: "called" };
+  }
   const live = crStatusRead(char).live;
   const homes = crLineHomeOf(char);
   for (let i = 0; i < live.length; i++){
@@ -6858,6 +6986,7 @@ function crHomePlace(char: Character, rooms: CrBrainSet, scenarioId: string) : C
 }
 
 const CR_HOME_IDLE = "_idle";
+const CR_HOME_CALLED = "_call";
 
 // 1.0.11–1.0.13 kept activities beside the schedule; fold them into the lines once, at load (D-123).
 function crMigrateActivities(list: any[]) : boolean
@@ -11885,95 +12014,225 @@ function CrScenarioProfile(props: { st: CrUiState; scenario: Scenario }) : any
 
 // [KIT-FROM-CE]
 
-function CrClockPanel(props: { mobile: boolean }) : any
+// [CR-CLOCK] 1.0.20: one compact clock, on the Chat tab's Clock panel and at the top of Home. The time, then (story
+// time) three steppers and a Go to box with four times of day; every move builds a draft until Set the clock.
+type CrClockUi = { goRev: number; goNote: string; more: boolean };
+let crClockUi: CrClockUi = { goRev: 0, goNote: "", more: false };
+
+const CR_CLOCK_PRESETS: { label: string; min: number }[] = [
+  { label: "Morning", min: 480 }, { label: "Noon", min: 720 }, { label: "Evening", min: 1080 }, { label: "Night", min: 1320 }
+];
+
+// The next moment at this time of day after fromMs, on a given weekday when one is named.
+function crClockNextAt(fromMs: number, minutes: number, weekday?: string) : number
+{
+  for (let k = 0; k <= 7; k++){
+    const t = crClockTimeOfDayMs(fromMs + k * CR_DAY_MIN * CR_MIN_MS, minutes);
+    if (t > fromMs && (!weekday || crWeekdayOf(t) === weekday)){
+      return t;
+    }
+  }
+  return crClockTimeOfDayMs(fromMs, minutes);
+}
+
+// What the Go to box understands: "+3h", "-30m", "+2d"; "14:30", "2pm", "9:15 am" (the next one); "fri 21:00";
+// "morning", "noon", "evening", "night"; "now" (the device's time). NaN when it reads none of these.
+function crClockParse(text: string, fromMs: number) : number
+{
+  const t = String(text || "").trim().toLowerCase();
+  if (!t){
+    return NaN;
+  }
+  const rel = /^([+-])\s*(\d+(?:\.\d+)?)\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?)$/.exec(t);
+  if (rel){
+    const n = Number(rel[2]) * (rel[1] === "-" ? -1 : 1);
+    const per = rel[3].charAt(0) === "m" ? 1 : (rel[3].charAt(0) === "h" ? 60 : CR_DAY_MIN);
+    return fromMs + Math.round(n * per) * CR_MIN_MS;
+  }
+  if (t === "now"){
+    return crClockRoundHalf(Date.now());
+  }
+  const preset = CR_CLOCK_PRESETS.find((p) => p.label.toLowerCase() === t);
+  if (preset){
+    return crClockNextAt(fromMs, preset.min);
+  }
+  const m = /^(?:(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\s+)?(\d{1,2})(?:\s*[:.]\s*(\d{2}))?\s*(am|pm)?$/.exec(t);
+  if (!m){
+    return NaN;
+  }
+  let hr = Number(m[2]);
+  const mi = m[3] ? Number(m[3]) : 0;
+  if (m[4]){
+    if (hr < 1 || hr > 12){
+      return NaN;
+    }
+    hr = (hr % 12) + (m[4] === "pm" ? 12 : 0);
+  }
+  else if (!m[3] && !m[1]){
+    return NaN;
+  }
+  if (hr > 23 || mi > 59){
+    return NaN;
+  }
+  const day = m[1] ? CR_JS_DAY_LIST.find((d) => d.toLowerCase().indexOf(m[1]) === 0) : undefined;
+  return crClockNextAt(fromMs, hr * 60 + mi, day);
+}
+
+function crClockGo(text: string) : void
+{
+  const base = crClockDraft > 0 ? crClockDraft : crClockNow();
+  const ms = crClockParse(text, base);
+  crClockUi.goRev++;
+  if (!isFinite(ms) || ms <= 0){
+    crClockUi.goNote = String(text || "").trim() ? "Try 14:30, 2pm, fri 21:00, +3h or morning." : "";
+    crTouch();
+    return;
+  }
+  crClockUi.goNote = "";
+  crClockDraftSet(ms);
+}
+
+// A small − label + group, one unit of time.
+function CrClockStep(props: { label: string; mins: number; onMove: (mins: number) => void }) : any
+{
+  const btn = (sign: number) => h("button", {
+    class: "cr-clock-step-btn",
+    "aria-label": (sign < 0 ? "Back " : "Forward ") + props.label,
+    title: (sign < 0 ? "Back " : "Forward ") + props.label,
+    onClick: () => props.onMove(sign * props.mins),
+    style: {
+      appearance: "none", border: "none", background: "transparent", color: CR_TEXT, cursor: "pointer",
+      font: "inherit", fontSize: CR_T_LG, lineHeight: "1", width: "30px", height: "30px",
+      display: "grid", placeItems: "center", borderRadius: CR_RADIUS_S, touchAction: "manipulation"
+    }
+  }, sign < 0 ? "\u2212" : "+");
+  return h("div", {
+    class: "cr-clock-step",
+    style: { display: "inline-flex", alignItems: "center", border: CR_LINE_W + " solid " + CR_LINE,
+             borderRadius: "999px", background: CR_FILL, flex: "0 0 auto" }
+  }, btn(-1), h("div", { style: { minWidth: "30px", textAlign: "center", color: CR_HEAD, fontSize: CR_T_SM, fontWeight: "600" } }, props.label), btn(1));
+}
+
+function CrClockBar(props: { mobile: boolean; home?: boolean }) : any
 {
   const story = crClock.mode === "story";
   const active = crClockActive();
   const nowMs = crClockNow();
-  const step = crClock.stepMin;
-  // Hand moves build a draft from wherever the draft stands; Set the clock moves it once (D-125).
-  const base = crClockDraft > 0 ? crClockDraft : crClock.storyMs;
-  const jump = (mins: number) => () => { crClockDraftSet(base + Math.round(mins) * CR_MIN_MS); };
-  return h(CrSection, {
-    title: "Clock",
-    note: story
-      ? "Story time. It moves when you move it, and undo rewinds it with the turn that spent it."
-      : "Real time, from this device. Time Apart follows AR's Track Real Time toggle, which is "
-        + (crClock.trackReal ? "on." : "off — the schedule reaches the model only while it is on.")
-  },
-    h("div", { style: { marginTop: CR_S_3, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_4 } },
-      h("div", {
-        style: {
-          background: CR_SUNK, border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
-          padding: "10px 12px", display: "flex", alignItems: "baseline", gap: CR_S_3, flexWrap: "wrap"
-        }
-      },
-        h("div", { style: { color: CR_HEAD, fontSize: CR_T_XL, fontWeight: "700" } },
-          crFmtHM(crMinutesOfDay(nowMs))),
-        h("div", { style: { color: CR_TEXT, fontSize: CR_T_MD } }, crWeekdayOf(nowMs)),
-        h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, crFmtDate(nowMs)),
-        h("div", { style: { flex: "1 1 auto" } }),
-        h(CrPill, { text: story ? (active ? "story" : "story, unset") : "real", tone: story ? "accent" : "" })
-      ),
-      h(CrChoice, {
-        label: "This chat runs on",
-        options: [{ id: "real", label: "Real time" }, { id: "story", label: "Story time" }],
-        active: crClock.mode,
-        onPick: (id: string) => { crClockSetMode(id === "story" ? "story" : "real").catch(() => {}); }
-      }),
-      story ? h(CrField, { label: "Move the clock", hint: "Every consumer reads this: macros, Time Apart, Current Events and the schedule." },
-        h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_1 } },
-          h(CrButton, { text: "−1h", onClick: jump(-60) }),
-          h(CrButton, { text: "−30m", onClick: jump(-30) }),
-          h(CrButton, { text: "+30m", onClick: jump(30) }),
-          h(CrButton, { text: "+1h", onClick: jump(60) }),
-          h(CrButton, { text: "+8h", onClick: jump(480) }),
-          h(CrButton, { text: "Next morning", onClick: () => { crClockDraftSet(crClockNextMorningMs(base)); } })
-        )
-      ) : null,
-      story ? h(CrField, { label: "Move the day" },
-        h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", marginTop: CR_S_1 } },
-          h(CrButton, { text: "−1 day", onClick: jump(-CR_DAY_MIN) }),
-          h(CrButton, { text: "+1 day", onClick: jump(CR_DAY_MIN) }),
-          h(CrButton, { text: "Set to 08:00", onClick: () => { crClockDraftSet(crClockTimeOfDayMs(base, CR_MORNING_MIN)); } }),
-          h(CrButton, { text: "Match device", onClick: () => { crClockDraftSet(crClockRoundHalf(Date.now())); } })
-        )
-      ) : null,
-      story ? h(CrField, { label: "Time of day", hint: "Type a time like 14:30 to put the draft there, on its own day." },
-        h(CrTextInput, { value: "", placeholder: crFmtHM(crMinutesOfDay(base)), onSet: (v: string) => {
-          const m = /^\s*(\d{1,2})\s*[:.]\s*(\d{2})\s*$/.exec(v);
-          if (m && Number(m[1]) < 24 && Number(m[2]) < 60){ crClockDraftSet(crClockTimeOfDayMs(base, Number(m[1]) * 60 + Number(m[2]))); }
-        } })) : null,
-      (story && crClockDraft > 0) ? h("div", {
-        style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center", padding: "8px 10px",
-                 border: CR_LINE_W + " solid " + CR_ACCENT, borderRadius: CR_RADIUS_S }
-      },
-        h("div", { style: { flex: "1 1 160px", minWidth: "0", color: CR_HEAD, fontSize: CR_T_MD } },
-          "Set to " + crFmtStamp(crClockDraft) + "  ·  " + crFmtDate(crClockDraft) + "  ·  "
-          + (crClockDraft >= nowMs ? "+" : "−") + crFmtSpan(crClockDraft - nowMs)),
-        h(CrButton, { text: "Set the clock", icon: "", primary: true, onClick: () => { crClockApplyDraft().catch(() => {}); } }),
-        h(CrButton, { text: "Cancel", icon: "", onClick: () => crClockDraftSet(0) })
-      ) : null,
+  const base = crClockDraft > 0 ? crClockDraft : nowMs;
+  const move = (mins: number) => { crClockDraftSet(base + Math.round(mins) * CR_MIN_MS); };
+  const chip = (text: string, onClick: () => void, title?: string) => h("button", {
+    key: text, onClick: onClick, title: title || text,
+    style: {
+      appearance: "none", cursor: "pointer", font: "inherit", fontSize: CR_T_SM, color: CR_TEXT,
+      padding: "5px 10px", borderRadius: "999px", border: CR_LINE_W + " solid " + CR_LINE, background: "transparent",
+      whiteSpace: "nowrap", touchAction: "manipulation"
+    }
+  }, text);
+  const face = h("div", { class: "cr-clock-face", style: { display: "flex", alignItems: "baseline", gap: CR_S_2, minWidth: "0", flexWrap: "wrap" } },
+    h("div", { style: { color: CR_HEAD, fontSize: CR_T_XL, fontWeight: "700", fontVariantNumeric: "tabular-nums" } }, crFmtHM(crMinutesOfDay(nowMs))),
+    h("div", { style: { color: CR_TEXT, fontSize: CR_T_MD } }, crWeekdayOf(nowMs)),
+    h("div", { style: { color: CR_DIM, fontSize: CR_T_SM } }, crFmtDate(nowMs)));
+  const mode = props.home
+    ? h(CrPill, { text: story ? (active ? "story time" : "story, unset") : "real time", tone: story ? "accent" : "" })
+    : h("div", { class: "cr-clock-mode", style: { display: "inline-flex", border: CR_LINE_W + " solid " + CR_LINE, borderRadius: "999px", overflow: "hidden", flex: "0 0 auto" } },
+        [{ id: "real", label: "Real" }, { id: "story", label: "Story" }].map((o) => h("button", {
+          key: o.id, onClick: () => { crClockSetMode(o.id === "story" ? "story" : "real").catch(() => {}); },
+          title: o.id === "story" ? "Story time: the clock moves when you move it" : "Real time, from this device",
+          style: {
+            appearance: "none", cursor: "pointer", font: "inherit", fontSize: CR_T_SM, padding: "5px 12px", border: "none",
+            background: crClock.mode === o.id ? CR_FILL2 : "transparent", color: crClock.mode === o.id ? CR_ACCENT : CR_DIM,
+            fontWeight: crClock.mode === o.id ? "600" : "400"
+          }
+        }, o.label)));
+  const rows: any[] = [
+    h("div", { key: "top", style: { display: "flex", alignItems: "center", gap: CR_S_3, flexWrap: "wrap" } },
+      h(CrIcon, { name: "clock" }), face, h("div", { style: { flex: "1 1 auto" } }), mode)
+  ];
+  if (story && active){
+    rows.push(h("div", { key: "moves", style: { display: "flex", alignItems: "center", gap: CR_S_2, flexWrap: "wrap" } },
+      h(CrClockStep, { label: "15m", mins: 15, onMove: move }),
+      h(CrClockStep, { label: "1h", mins: 60, onMove: move }),
+      h(CrClockStep, { label: "1d", mins: CR_DAY_MIN, onMove: move }),
+      CR_CLOCK_PRESETS.map((p) => chip(p.label, () => crClockDraftSet(crClockNextAt(base, p.min)),
+        "The next " + crFmtHM(p.min)))));
+    rows.push(h("div", { key: "go", style: { display: "flex", alignItems: "center", gap: CR_S_2 } },
+      h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
+        h("input", {
+          key: "go" + crClockUi.goRev, type: "text", placeholder: "Go to\u2026  14:30 \u00b7 fri 9pm \u00b7 +3h",
+          onChange: (e: any) => crClockGo(String(e && e.target ? e.target.value : "")),
+          style: crInputStyle(CR_T_SM)
+        })),
+      props.home ? null : chip("Device time", () => crClockDraftSet(crClockRoundHalf(Date.now())), "Put the draft at this device's time")));
+    if (crClockUi.goNote){
+      rows.push(h("div", { key: "gonote", style: { color: CR_WARN, fontSize: CR_T_SM } }, crClockUi.goNote));
+    }
+  }
+  if (story && active && crClockDraft > 0){
+    rows.push(h("div", {
+      key: "draft",
+      style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center", padding: "6px 8px",
+               border: CR_LINE_W + " solid " + CR_ACCENT, borderRadius: CR_RADIUS_S }
+    },
+      h("div", { style: { flex: "1 1 150px", minWidth: "0", color: CR_HEAD, fontSize: CR_T_MD } },
+        "\u2192 " + crWeekdayOf(crClockDraft).slice(0, 3) + " " + crFmtHM(crMinutesOfDay(crClockDraft)) + "  \u00b7  " + crFmtDate(crClockDraft)
+        + "  \u00b7  " + (crClockDraft >= nowMs ? "+" : "\u2212") + crFmtSpan(crClockDraft - nowMs)),
+      h(CrButton, { text: "Set the clock", icon: "", primary: true, onClick: () => { crClockApplyDraft().catch(() => {}); } }),
+      h(CrButton, { text: "Cancel", icon: "", onClick: () => crClockDraftSet(0) })));
+  }
+  if (story && !active){
+    rows.push(h("div", { key: "unset", style: { display: "flex", gap: CR_S_2, alignItems: "center", flexWrap: "wrap", color: CR_DIM, fontSize: CR_T_SM } },
+      "The story clock is not set yet.",
+      chip("Start at device time", () => { crClockResetToDevice().catch(() => {}); })));
+  }
+  if (!story && props.home){
+    rows.push(h("div", { key: "real", style: { color: CR_DIM, fontSize: CR_T_SM } },
+      "Real time. Switch to story time on the Chat tab's Clock to move it by hand."));
+  }
+  return h("div", {
+    class: "cr-clock-bar",
+    style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, padding: props.home ? "8px 10px" : "0",
+             background: props.home ? CR_SURFACE : "transparent",
+             border: props.home ? (CR_LINE_W + " solid " + CR_LINE) : "none", borderRadius: CR_RADIUS }
+  }, rows);
+}
+
+function CrClockPanel(props: { mobile: boolean }) : any
+{
+  const story = crClock.mode === "story";
+  const more = crClockUi.more;
+  return h(CrSection, { title: "Clock" },
+    h("div", { style: { marginTop: CR_S_2, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+      h(CrClockBar, { mobile: props.mobile }),
       (story && !crClockDraft && crClockTallyNote.length) ? h("div", { style: { display: "grid", gap: CR_S_1 } },
         crClockTallyNote.map((ln, i) => h("div", { key: String(i), style: { color: i ? CR_TEXT : CR_HEAD, fontSize: CR_T_SM, lineHeight: "1.45" } }, ln))) : null,
-      story ? h(CrChoice, {
-        label: "Advance per reply",
-        hint: "Added after every xialong reply. Off leaves the clock entirely in your hands.",
-        options: CR_CLOCK_STEP_LIST.map((n) => ({ id: String(n), label: n === 0 ? "Off" : String(n) + "m" })),
-        active: String(step),
-        onPick: (id: string) => { crClockSetStep(Number(id)).catch(() => {}); }
-      }) : null,
-      h(CrChoice, {
-        label: "Track Real Time",
-        hint: story
-          ? "Only read in real time. Story time carries Time Apart and Current Events by itself."
-          : (crClock.trackReal
-            ? "On, so the model is told how long you were away and the schedule is sent."
-            : "Off, so the model is never told how long you were away and the schedule is not sent."),
-        options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }],
-        active: crClock.trackReal ? "on" : "off",
-        onPick: (id: string) => { crSetTrackRealTime(id === "on").catch(() => {}); }
-      })
+      h("button", {
+        onClick: () => { crClockUi.more = !more; crTouch(); },
+        style: { appearance: "none", border: "none", background: "transparent", color: CR_DIM, cursor: "pointer",
+                 font: "inherit", fontSize: CR_T_SM, textAlign: "left", padding: "0" }
+      }, (more ? "\u25be " : "\u25b8 ") + "Clock settings  \u00b7  "
+        + (story ? ("advance " + (crClock.stepMin ? crClock.stepMin + "m" : "off") + " per reply") : ("Track Real Time " + (crClock.trackReal ? "on" : "off")))),
+      more ? h("div", { style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
+        h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } }, story
+          ? "Story time moves when you move it; undo rewinds it with the turn that spent it. Every consumer reads it: macros, Time Apart, Current Events, the schedule and Home."
+          : "Real time, from this device. Time Apart follows AR's Track Real Time toggle."),
+        story ? h(CrChoice, {
+          label: "Advance per reply",
+          hint: "Added after every xialong reply. Off leaves the clock entirely in your hands.",
+          options: CR_CLOCK_STEP_LIST.map((n) => ({ id: String(n), label: n === 0 ? "Off" : String(n) + "m" })),
+          active: String(crClock.stepMin),
+          onPick: (id: string) => { crClockSetStep(Number(id)).catch(() => {}); }
+        }) : null,
+        h(CrChoice, {
+          label: "Track Real Time",
+          hint: story
+            ? "Only read in real time. Story time carries Time Apart and Current Events by itself."
+            : (crClock.trackReal
+              ? "On, so the model is told how long you were away and the schedule is sent."
+              : "Off, so the model is never told how long you were away and the schedule is not sent."),
+          options: [{ id: "off", label: "Off" }, { id: "on", label: "On" }],
+          active: crClock.trackReal ? "on" : "off",
+          onPick: (id: string) => { crSetTrackRealTime(id === "on").catch(() => {}); }
+        })) : null
     )
   );
 }
@@ -12899,11 +13158,6 @@ async function crSetTrackRealTime(on: boolean) : Promise<void>
   crTouch();
 }
 
-function crInjecting() : boolean
-{
-  return !!(chatSettings.char && chatSettings.user);
-}
-
 function crGreetingText() : string
 {
   const char = crLiveContact();
@@ -13205,7 +13459,7 @@ function CrChatSurface(props: { mobile: boolean; tab: string }) : any
 {
   const tab = (props.tab === "stage" || props.tab === "group" || props.tab === "brains" || props.tab === "home") ? props.tab : "chat";
   const strip = h(CrTabs, {
-    tabs: [{ id: "chat", label: "Chat" }, { id: "brains", label: "Brains" }, { id: "home", label: crHomeBadge() ? "Home ●" : "Home" }, { id: "stage", label: "Stage" }, { id: "group", label: "Group" }],
+    tabs: [{ id: "chat", label: "Chat" }, { id: "home", label: crHomeBadge() ? "Home ●" : "Home" }, { id: "stage", label: "Stage" }, { id: "group", label: "Group" }, { id: "brains", label: "Brains" }],
     active: tab, mobile: props.mobile,
     onPick: (id: string) => crNav({ chatTab: id })
   });
@@ -13236,30 +13490,11 @@ function CrChatSurface(props: { mobile: boolean; tab: string }) : any
       h(CrGroupTab, { mobile: props.mobile })
     );
   }
-  const contact = crLiveContact();
-  const user = crLiveUser();
-  const injecting = crInjecting();
+  // 1.0.20: the "This story" header is gone — Pairing says who is paired, and the last pairing or greeting note
+  // shows here above it.
   return h("div", { class: "cr-surface cr-surface-chat" },
     h("div", { style: { marginBottom: CR_S_4 } }, strip),
-    h(CrSection, { title: "This story" },
-      h("div", { style: { display: "flex", gap: CR_S_5, alignItems: "center", marginTop: CR_S_3 } },
-        h(CrAvatar, { src: contact ? contact.avatar : "", name: contact ? contact.name : "?",
-                      charId: contact ? contact.id : undefined,
-                      size: crAvatarSize(40, props.mobile, "avatar-chat", 48, 3.4, 80) }),
-        h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
-          h("div", { style: { color: CR_HEAD, fontSize: CR_T_LG, fontWeight: "600" } },
-            contact ? contact.name : "No Contact paired"),
-          h("div", { style: { color: CR_DIM, fontSize: CR_T_MD } },
-            "with " + (user ? user.name : "no User")),
-          contact ? h("div", { style: { marginTop: CR_S_2 } },
-            h(CrStatusLine, { char: contact, mobile: props.mobile })) : null
-        ),
-        h(CrPill, { text: injecting ? "in context" : "not sent", tone: injecting ? "accent" : "" })
-      ),
-      injecting ? null : h("div", { style: { marginTop: CR_S_3, color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
-        "CharacterRoom adds nothing to context until both a Contact and a User are paired."),
-      h(CrNote, { text: crChatNote })
-    ),
+    crChatNote ? h("div", { style: { marginBottom: CR_S_4 } }, h(CrNote, { text: crChatNote })) : null,
     h(CrPairingPanel, { mobile: props.mobile }),
     h(CrTonePanel, null),
     h(CrGreetingPanel, null),
@@ -23235,8 +23470,11 @@ function CrStageSurface(props: { mobile: boolean }) : any
 const CR_HOME_GRID = 10;
 const CR_LAYER_BLENDS = ["normal", "screen", "lighten", "overlay", "soft-light", "multiply"];
 
-type CrHomeUi = { look: string; arrange: boolean; sel: string; drag: string; open: Record<string, boolean> };
-let crHomeUi: CrHomeUi = { look: "", arrange: false, sel: "", drag: "", open: {} };
+// say: what the User has typed under a person's actions (sent with the next action or call, then cleared — sayRev
+// remounts the box empty); resetArm: the person whose Reset was tapped once.
+type CrHomeUi = { look: string; arrange: boolean; sel: string; drag: string; open: Record<string, boolean>;
+                  say: Record<string, string>; sayRev: number; resetArm: string };
+let crHomeUi: CrHomeUi = { look: "", arrange: false, sel: "", drag: "", open: {}, say: {}, sayRev: 0, resetArm: "" };
 let crHomeSaveTimer = 0;
 
 // charId|lineId (a schedule line's spot here, or _idle) — L:roomId|layerId for a layer.
@@ -23593,6 +23831,66 @@ function CrHomeSlider(props: { label: string; k: string; field: string; min: num
 }
 
 
+// [CR-HOME] 1.0.20: an on/off switch that looks like one, not like another button.
+function CrSwitch(props: { on: boolean; label: string; onClick: () => void; title?: string }) : any
+{
+  return h("button", {
+    class: "cr-switch" + (props.on ? " cr-switch-on" : ""), role: "switch", "aria-checked": props.on ? "true" : "false",
+    title: props.title || props.label, onClick: props.onClick,
+    style: { appearance: "none", border: "none", background: "transparent", cursor: "pointer", font: "inherit",
+             display: "inline-flex", alignItems: "center", gap: CR_S_2, padding: "4px 2px", fontSize: CR_T_BASE,
+             color: props.on ? CR_HEAD : CR_DIM, touchAction: "manipulation" }
+  },
+    h("span", { style: { position: "relative", width: "36px", height: "20px", borderRadius: "999px", flex: "0 0 auto", boxSizing: "border-box",
+                         background: props.on ? CR_ACCENT : CR_FILL2, border: CR_LINE_W + " solid " + (props.on ? CR_ACCENT : CR_LINE),
+                         transition: CR_MOTION } },
+      h("span", { style: { position: "absolute", top: "2px", left: props.on ? "18px" : "2px", width: "14px", height: "14px",
+                           borderRadius: "50%", background: props.on ? CR_SURFACE : CR_DIM, transition: "left 120ms ease" } })),
+    h("span", null, props.label));
+}
+
+// [CR-HOME] 1.0.20: one room on the room strip — its Home picture, who is in it, a lock when it is shut, and the
+// one in view lit.
+function CrHomeRoomTile(props: { scenarioId: string; v: CrSetVariant; on: boolean; shut: boolean; people: Character[];
+                                 you: boolean; mobile: boolean; onPick: () => void }) : any
+{
+  const v = props.v;
+  const shown = props.people.slice(0, 3);
+  const count = props.people.length + (props.you ? 1 : 0);
+  return h(CrPressable, { render: (hover: boolean, press: boolean, handlers: any) => h("button", Object.assign({
+    class: "cr-home-tile" + (props.on ? " cr-home-tile-on" : ""),
+    onClick: props.onPick,
+    "aria-pressed": props.on ? "true" : "false",
+    "aria-label": (v.name || "Room") + (props.shut ? ", shut" : "") + (count ? ", " + String(count) + " here" : ""),
+    title: (v.name || "Room") + (props.shut ? " — opens at " + crLevelLabel(v.lock || "") : ""),
+    style: {
+      appearance: "none", position: "relative", flex: "0 0 auto", width: props.mobile ? "92px" : "116px", aspectRatio: "4 / 3",
+      padding: "0", boxSizing: "border-box", borderRadius: CR_RADIUS_S, overflow: "hidden", cursor: "pointer", font: "inherit",
+      border: (props.on ? "2px" : CR_LINE_W) + " solid " + ((props.on || hover) ? CR_ACCENT : CR_LINE),
+      boxShadow: props.on ? ("0 0 0 3px color-mix(in srgb, " + CR_ACCENT + " 30%, transparent)") : "none",
+      background: CR_SUNK, transform: press ? "translateY(1px)" : "none", transition: CR_MOTION, touchAction: "manipulation"
+    }
+  }, handlers),
+    crImgAnchor(props.scenarioId, "h-" + v.id, "fit=cover,collapse=1",
+      { position: "absolute", inset: "0", width: "100%", height: "100%", display: "block",
+        opacity: props.shut ? "0.35" : (props.on ? "1" : "0.8"), filter: props.shut ? "grayscale(0.85)" : "none" }),
+    h("div", {
+      style: { position: "absolute", left: "0", right: "0", bottom: "0", padding: "16px 6px 4px", textAlign: "left",
+               background: "linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,0.8))", color: "#fff", fontSize: CR_T_SM,
+               fontWeight: props.on ? "700" : "500", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+    }, (props.shut ? "🔒 " : "") + (v.name || "Room")),
+    (shown.length || props.you) ? h("div", { style: { position: "absolute", top: "4px", left: "4px", display: "flex", alignItems: "center" } },
+      shown.map((c, i) => h("div", { key: c.id, style: { marginLeft: i ? "-7px" : "0", borderRadius: "50%", boxShadow: "0 0 0 2px rgba(0,0,0,0.55)" } },
+        h(CrAvatar, { name: c.name || "?", charId: c.id, size: 22 }))),
+      props.people.length > 3 ? h("div", { style: { marginLeft: "3px", color: "#fff", fontSize: CR_T_XS, textShadow: "0 1px 2px #000" } },
+        "+" + String(props.people.length - 3)) : null,
+      props.you ? h("div", {
+        title: "You", style: { marginLeft: shown.length ? "-4px" : "0", padding: "1px 6px", borderRadius: "999px", fontSize: CR_T_XS,
+                               fontWeight: "700", background: CR_ACCENT, color: CR_SURFACE, boxShadow: "0 0 0 2px rgba(0,0,0,0.55)" }
+      }, "You") : null) : null
+  ) });
+}
+
 function CrHomeSurface(props: { mobile: boolean }) : any
 {
   const contact = crLiveContact();
@@ -23713,31 +24011,48 @@ function CrHomeSurface(props: { mobile: boolean }) : any
     "data-ce-ar-host": "1",
     "data-ce-zoom": arrange ? "zoom" : "pan",
     style: {
-      position: "relative", width: "100%", aspectRatio: "var(--ce-img-ar, 1 / 1)", maxHeight: "78vh",
-      background: CR_SUNK, border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS_S,
-      overflow: "hidden", touchAction: "none"
+      position: "relative", width: "100%", aspectRatio: "var(--ce-img-ar, 1 / 1)", maxHeight: "70vh",
+      background: CR_SUNK, borderRadius: CR_RADIUS_S, overflow: "hidden", touchAction: "none"
     }
   }, world);
 
-  const who = (id: string) => shut(id) ? [] : cast.filter((c) => places[c.id].room === id).map((c) => c.name).concat(userRoom === id ? ["you"] : []);
-  const strip = h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
-    rooms.variants.map((v) => {
-      const n = who(v.id).length;
-      return h(CrButton, {
-        key: v.id, icon: "", primary: v.id === view,
-        text: (shut(v.id) ? "🔒 " : "") + (v.name || "Room") + (n ? "  ·  " + String(n) : ""),
-        onClick: () => { crHomeUi.look = v.id; crTouch(); }
-      });
-    }));
+  // The room strip: every place as a tile, the one in view lit, its people on it.
+  const peopleIn = (id: string) => shut(id) ? [] : cast.filter((c) => places[c.id].room === id);
+  const strip = h("div", {
+    class: "cr-home-strip",
+    style: { display: "flex", gap: CR_S_2, overflowX: "auto", padding: "3px 3px 6px", scrollbarWidth: "thin", WebkitOverflowScrolling: "touch" }
+  }, rooms.variants.map((v) => h(CrHomeRoomTile, {
+    key: v.id, scenarioId: scenario.id, v: v, on: v.id === view, shut: shut(v.id), people: peopleIn(v.id),
+    you: !shut(v.id) && userRoom === v.id, mobile: props.mobile,
+    onPick: () => { crHomeUi.look = v.id; crTouch(); }
+  })));
 
-  const here = who(view);
+  const here = peopleIn(view).map((c) => c.name).concat(userRoom === view ? ["you"] : []);
   const atmos = locked ? [] : crAtmosLive(viewRoom).map((a) => (a.text || "").trim()).filter(Boolean);
-  const status = (locked ? (roomName(view) + " is shut to you for now.")
-      : (here.length ? ("In " + roomName(view) + ": " + here.join(", ") + ".") : ("Nobody is in " + roomName(view) + ".")))
+  const status = (locked ? ("Shut to you for now — opens at " + crLevelLabel(viewRoom.lock || "") + ".")
+      : (here.length ? ("Here: " + here.join(", ") + ".") : "Nobody here."))
     + (view !== contactRoom ? "  " + (contact.name || "The Contact")
         + (shut(contactRoom) ? " is somewhere you can't follow yet." : " is in " + roomName(contactRoom) + ".") : "")
-    + (!userRoom ? "  You are not with them." : (view !== userRoom ? "  You are in " + roomName(userRoom) + "." : ""))
+    + (!userRoom ? "  You are not with them." : "")
     + (atmos.length ? "  " + atmos.join(" ") : "");
+  const roomHead = h("div", { class: "cr-home-roomhead", style: { display: "flex", alignItems: "center", gap: CR_S_2, flexWrap: "wrap" } },
+    h("div", { style: { flex: "1 1 180px", minWidth: "0" } },
+      h("div", { style: { color: CR_HEAD, fontSize: CR_T_LG, fontWeight: "700" } },
+        (locked ? "🔒 " : "") + roomName(view) + (arrange ? "  ·  arranging" : "")),
+      h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } }, status)),
+    (!arrange && view !== userRoom && !locked) ? h(CrButton, { text: "Go here", icon: "",
+      title: "Put yourself in " + roomName(view) + " (pinned for this story)",
+      onClick: () => { crHomeUi.look = ""; crPickVariant(rooms.id, view).catch(() => {}); } }) : null,
+    (!arrange && (crHomeUi.look || pinned)) ? h(CrButton, { text: "Follow " + (contact.name || "the Contact"), icon: "",
+      onClick: () => { crHomeUi.look = ""; if (pinned){ crUnpinVariant(rooms.id).catch(() => {}); } else { crTouch(); } } }) : null);
+  const roomCard = h("div", {
+    class: "cr-home-roomcard",
+    style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2, padding: "10px", background: CR_SURFACE,
+             border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS }
+  }, roomHead, box,
+    h("div", { style: { color: CR_DIM, fontSize: CR_T_XS } }, crBridge.bridgeZoom
+      ? (arrange ? "Pinch or scroll to zoom · double-tap to reset" : "Pinch or scroll to zoom · drag to look around · double-tap to reset")
+      : "Update the bridge to 3.0.40 to zoom and pan."));
 
   const save = (k: string) => { const t = crHomeTarget(k); if (t){ t.save().catch(() => {}); } };
   const k = crHomeUi.sel;
@@ -23887,34 +24202,37 @@ function CrHomeSurface(props: { mobile: boolean }) : any
     });
   }
 
-  // Cast members with needs or actions get a care panel, whoever is in view first.
-  const caring = cast.filter((c) => crNeedsOf(c).length || crHomeActionsOf(c).length)
-    .sort((a, b) => (places[a.id].room === view ? 0 : 1) - (places[b.id].room === view ? 0 : 1));
-  const care = arrange ? null : caring.map((c) => h(CrHomeCare, { key: "care" + c.id, char: c,
-    where: shut(places[c.id].room) ? "somewhere private" : "in " + roomName(places[c.id].room) }));
+  // A card per cast member — the one in view first: who they are and what they are doing, the track, needs,
+  // Call here, actions, what exactly, the log.
+  const order = cast.slice().sort((a, b) => (places[a.id].room === view ? 0 : 1) - (places[b.id].room === view ? 0 : 1));
+  const care = arrange ? null : order.map((c) => {
+    const pl = places[c.id];
+    const away = shut(pl.room);
+    const evt = crHomeLiveLine(c);
+    const called = pl.why === "called";
+    return h(CrHomeCare, { key: "care" + c.id, char: c, mobile: props.mobile, scenario: scenario,
+      where: away ? "somewhere private" : "in " + roomName(pl.room),
+      doing: away ? "" : (called ? "came when called" : ((evt && (evt.text || "").trim()) || "")),
+      called: called,
+      callRoom: (!locked && pl.room !== view) ? { id: view, name: roomName(view) } : undefined });
+  });
 
   return h("div", { class: "cr-home", style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3 } },
-    h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap", alignItems: "center" } },
-      h(CrButton, { text: crHomeOn ? "Home is on in this chat" : "Home is off in this chat", icon: "", primary: crHomeOn,
+    h(CrClockBar, { mobile: props.mobile, home: true }),
+    h("div", { class: "cr-home-tools", style: { display: "flex", gap: CR_S_2, alignItems: "center", flexWrap: "wrap" } },
+      h(CrSwitch, { on: crHomeOn, label: crHomeOn ? "Home is on" : "Home is off",
+        title: "On: each speaker is told only the room they are in, who is there with them, and their needs.",
         onClick: () => { crHomeSetOn(!crHomeOn).catch(() => {}); } }),
-      h(CrButton, { text: arrange ? "Done arranging" : "Arrange", icon: "", primary: arrange,
-        onClick: () => { crHomeUi.arrange = !arrange; crHomeUi.drag = ""; crTouch(); } }),
-      (arrange || locked) ? null : h(CrButton, { text: "Snapshot", icon: "", onClick: () => crHomeSnapshot(scenario, rooms, view) }),
-      caring.length ? h(CrButton, { text: crHomeNeedsLine ? "Needs go to the chat" : "Needs stay on Home", icon: "", primary: crHomeNeedsLine,
-        onClick: () => { crHomeSetNeedsLine(!crHomeNeedsLine).catch(() => {}); } }) : null,
-      (view !== userRoom && !locked) ? h(CrButton, { text: "Drop in", icon: "",
-        onClick: () => { crHomeUi.look = ""; crPickVariant(rooms.id, view).catch(() => {}); } }) : null,
-      (crHomeUi.look || pinned) ? h(CrButton, { text: "Follow " + (contact.name || "the Contact"), icon: "",
-        onClick: () => { crHomeUi.look = ""; if (pinned){ crUnpinVariant(rooms.id).catch(() => {}); } else { crTouch(); } } }) : null
-    ),
+      h("div", { style: { flex: "1 1 auto" } }),
+      (arrange || locked) ? null : h(CrButton, { text: "Snapshot", icon: "camera", title: "Hand this room and its people to Illustrate",
+        onClick: () => crHomeSnapshot(scenario, rooms, view) }),
+      h(CrButton, { text: arrange ? "Done arranging" : "Arrange", icon: arrange ? "check" : "pencil", primary: arrange,
+        title: arrange ? "Back to playing" : "Place people, pictures and layers",
+        onClick: () => { crHomeUi.arrange = !arrange; crHomeUi.drag = ""; crTouch(); } })),
     crHomeOn ? null : h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
-      "While Home is off the chat works as before. On, each speaker is told only the room they are in and who is there with them."),
+      "While Home is off the chat works as before. On, each speaker is told only the room they are in, who is there with them, and their needs."),
     strip,
-    h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.45" } },
-      status + (crBridge.bridgeZoom
-        ? (arrange ? "  Pinch or scroll to zoom; double-tap to reset." : "  Pinch or scroll to zoom, drag to look around, double-tap to reset.")
-        : "  Update the bridge to 3.0.40 to zoom and pan.")),
-    box,
+    roomCard,
     crHomeNote ? h("div", { style: { color: CR_WARN, fontSize: CR_T_SM } }, crHomeNote) : null,
     arrange ? null : h(CrHomeAway, null),
     care,
@@ -24383,9 +24701,12 @@ function CrHomeAway() : any
   ));
 }
 
-// [CR-HOME] Home's care panel for one cast member: their needs as meters, the relationship track with its step when
-// one is ready, the actions (each says why it is shut when it is), and what was done lately with a reaction to send.
-function CrHomeCare(props: { char: Character; where: string }) : any
+// [CR-HOME] 1.0.20: a cast member's card on Home — portrait (wearing a low need's look), where they are and what
+// they are doing, the relationship track with its step, needs as meters, then the things to do as tiles: Call here
+// (or Let them go), each action with what it does or why it is shut; under them an optional line for what exactly,
+// sent with the next tile and cleared; the last few things done, each with its reaction; and Reset.
+function CrHomeCare(props: { char: Character; where: string; doing: string; called: boolean; mobile: boolean;
+                             scenario?: Scenario; callRoom?: { id: string; name: string } }) : any
 {
   const char = props.char;
   crCareSeed(char);
@@ -24397,16 +24718,60 @@ function CrHomeCare(props: { char: Character; where: string }) : any
   const step = crBondStep(char);
   const log = crHomeLog.filter((x) => x.whoId === char.id && x.kind !== "away").slice(-3).reverse();
   const busy = !!crHomeBusy || !!crGroupBusyId;
+  const take = () => { const d = crHomeUi.say[char.id] || ""; delete crHomeUi.say[char.id]; crHomeUi.sayRev++; return d; };
+  const needName = (id: string) => { const n = needs.find((x) => x.id === id); return n ? (n.name || "Need") : id; };
+  const signed = (n: number) => (n > 0 ? "+" : "−") + String(Math.abs(n));
   const meter = (key: string, label: string, v: number, max: number, warn: boolean) =>
-    h("div", { key: key, style: { display: "grid", gridTemplateColumns: "minmax(64px, 30%) 1fr auto", gap: CR_S_2, alignItems: "center" } },
-      h("div", { style: { color: warn ? CR_WARN : CR_TEXT, fontSize: CR_T_SM, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, label),
-      h(CrMeter, { value: v, max: max, colour: warn ? CR_WARN : CR_ACCENT, look: "bar" }),
-      h("div", { style: { color: CR_DIM, fontSize: CR_T_XS, minWidth: "48px", textAlign: "right" } }, String(Math.round(v)) + "/" + String(max)));
-  return h(CrSection, {
-    title: (char.name || "Unnamed") + (props.where ? "  ·  " + props.where : ""),
-    note: ""
-  }, h("div", { style: { marginTop: CR_S_2, display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_2 } },
-    needs.map((n) => meter(n.id, n.name || "Need", cur.needs[n.id], n.max, cur.needs[n.id] <= n.low)),
+    h("div", { key: key, class: "cr-home-meter", style: { display: "grid", gap: "3px", minWidth: "0" } },
+      h("div", { style: { display: "flex", justifyContent: "space-between", gap: CR_S_2, fontSize: CR_T_SM } },
+        h("span", { style: { color: warn ? CR_WARN : CR_TEXT, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, label),
+        h("span", { style: { color: warn ? CR_WARN : CR_DIM, fontVariantNumeric: "tabular-nums", flex: "0 0 auto" } }, String(Math.round(v)) + "/" + String(max))),
+      h(CrMeter, { value: v, max: max, colour: warn ? CR_WARN : CR_ACCENT, look: "bar" }));
+  const tile = (key: string, title: string, sub: string, onClick: () => void, opt: { off?: boolean; accent?: boolean; warn?: boolean }) =>
+    h(CrPressable, { key: key, render: (hover: boolean, press: boolean, handlers: any) => h("button", Object.assign({
+      class: "cr-home-act" + (opt.accent ? " cr-home-act-call" : ""), disabled: !!opt.off, onClick: onClick,
+      title: title + (sub ? " — " + sub : ""),
+      style: {
+        appearance: "none", textAlign: "left", font: "inherit", cursor: opt.off ? "default" : "pointer", minWidth: "0",
+        padding: "8px 10px", borderRadius: CR_RADIUS_S, boxSizing: "border-box",
+        border: CR_LINE_W + " solid " + (opt.accent ? CR_ACCENT : ((hover && !opt.off) ? CR_ACCENT : CR_LINE)),
+        background: opt.off ? "transparent" : crPressBg(hover, press, opt.accent ? CR_FILL2 : CR_FILL),
+        color: opt.off ? CR_DIM : (opt.accent ? CR_ACCENT : CR_HEAD), opacity: opt.off ? "0.6" : "1",
+        transform: (press && !opt.off) ? "translateY(1px)" : "none", transition: CR_MOTION, touchAction: "manipulation"
+      }
+    }, opt.off ? {} : handlers),
+      h("div", { style: { fontSize: CR_T_BASE, fontWeight: "600", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, title),
+      sub ? h("div", { style: { fontSize: CR_T_XS, marginTop: "2px", color: opt.warn ? CR_WARN : CR_DIM, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, sub) : null) });
+
+  const tiles: any[] = [];
+  if (props.called){
+    tiles.push(tile("release", "Let them go", "back to their day", () => { crHomeRelease(char).catch(() => {}); }, {}));
+  }
+  else if (props.callRoom && props.scenario){
+    const room = props.callRoom;
+    const sc = props.scenario;
+    tiles.push(tile("call", "Call here", "to " + room.name, () => { crHomeCall(char, sc, room.id, take()).catch(() => {}); }, { accent: true }));
+  }
+  actions.forEach((a) => {
+    const why = crHomeActionGate(char, a);
+    const what = Object.keys(a.effects).map((id) => needName(id) + " " + signed(a.effects[id]))
+      .concat((a.bond && cfg) ? [(cfg.name || "Bond") + " " + signed(a.bond)] : []).join(" · ");
+    tiles.push(tile(a.id, a.name || "Action", why || what, () => { crHomeDoAction(char, a.id, take()).catch(() => {}); },
+      { off: !!why, warn: !!why }));
+  });
+  const armed = crHomeUi.resetArm === char.id;
+  const moodSlot = crResolveEmotionSlot(crNeedsEmotion(char), crFilledSlots(char.id)) || CR_SLOT_AVATAR;
+
+  return h("section", {
+    class: "cr-home-card",
+    style: { display: "grid", gridTemplateColumns: CR_GRID_COL, gap: CR_S_3, padding: "12px", background: CR_SURFACE,
+             border: CR_LINE_W + " solid " + CR_LINE, borderRadius: CR_RADIUS }
+  },
+    h("div", { style: { display: "flex", gap: CR_S_3, alignItems: "center" } },
+      h(CrAvatar, { name: char.name || "?", charId: char.id, slot: moodSlot, size: 46 }),
+      h("div", { style: { flex: "1 1 auto", minWidth: "0" } },
+        h("div", { style: { color: CR_HEAD, fontSize: CR_T_LG, fontWeight: "700" } }, char.name || "Unnamed"),
+        h("div", { style: { color: CR_DIM, fontSize: CR_T_SM, lineHeight: "1.4" } }, props.where + (props.doing ? "  ·  " + props.doing : "")))),
     (cfg && paired) ? meter(CR_BOND_ID, (cfg.name || "Bond") + "  ·  " + chatSettings.intimacy, cur.bond, cfg.max, cur.bond <= 0) : null,
     step.dir ? h("div", {
       class: "cr-home-step",
@@ -24419,22 +24784,38 @@ function CrHomeCare(props: { char: Character; where: string }) : any
                           : ((char.name || "They") + " is cooling toward you. Back to " + step.to + "?")),
       h(CrButton, { text: step.dir === "up" ? "Become " + step.to : "Go back to " + step.to, icon: "", primary: step.dir === "up",
         onClick: () => { crBondTakeStep(char).catch(() => {}); } })) : null,
-    actions.length ? h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
-      actions.map((a) => {
-        const why = crHomeActionGate(char, a);
-        return h(CrButton, { key: a.id, text: (a.name || "Action") + (why ? "  ·  " + why : ""), icon: "", disabled: !!why,
-          onClick: () => { crHomeDoAction(char, a.id).catch(() => {}); } });
+    needs.length ? h("div", { class: "cr-home-needs", style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: CR_S_3 } },
+      needs.map((n) => meter(n.id, n.name || "Need", cur.needs[n.id], n.max, cur.needs[n.id] <= n.low))) : null,
+    tiles.length ? h("div", { class: "cr-home-acts", style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(" + (props.mobile ? "112px" : "128px") + ", 1fr))", gap: CR_S_2 } }, tiles) : null,
+    tiles.length ? h("div", { class: "cr-home-say" },
+      h("input", {
+        key: "say" + char.id + "|" + String(crHomeUi.sayRev), type: "text",
+        placeholder: "What exactly? Optional — the food, the game, what you say",
+        onInput: (e: any) => { crHomeUi.say[char.id] = String(e && e.target ? e.target.value : "").slice(0, 300); },
+        onChange: (e: any) => { crHomeUi.say[char.id] = String(e && e.target ? e.target.value : "").slice(0, 300); },
+        style: crInputStyle(CR_T_SM)
       })) : null,
-    log.map((item) => h("div", { key: item.id, style: { display: "grid", gap: CR_S_1 } },
+    log.map((item) => h("div", { key: item.id, class: "cr-home-logitem", style: { display: "grid", gap: CR_S_1, borderTop: CR_LINE_W + " solid " + CR_LINE, paddingTop: CR_S_2 } },
       h("div", { style: { display: "flex", gap: CR_S_2, alignItems: "center", flexWrap: "wrap" } },
-        h("div", { style: { flex: "1 1 120px", minWidth: "0", color: CR_DIM, fontSize: CR_T_SM } }, crFmtStamp(item.at) + "  " + item.action),
+        h("div", { style: { flex: "1 1 120px", minWidth: "0", color: CR_DIM, fontSize: CR_T_SM } },
+          crFmtStamp(item.at) + "  " + item.action + (item.detail ? " — " + item.detail : "")),
         item.sent ? h(CrPill, { text: "in the chat" })
           : h(CrButton, { text: crHomeBusy === item.id ? "Writing…" : (item.text ? "Ask again" : "Ask for a reaction"), icon: "", disabled: busy,
               onClick: () => { crHomeReact(item.id).catch(() => {}); } }),
         (item.text && !item.sent) ? h(CrButton, { text: "Send to the chat", icon: "", primary: true, disabled: busy,
           onClick: () => { crHomeSendReaction(item.id).catch(() => {}); } }) : null),
-      item.text ? h("div", { style: { color: item.sent ? CR_DIM : CR_TEXT, fontSize: CR_T_SM, lineHeight: "1.45", whiteSpace: "pre-wrap" } }, item.text) : null))
-  ));
+      item.text ? h("div", { style: { color: item.sent ? CR_DIM : CR_TEXT, fontSize: CR_T_SM, lineHeight: "1.45", whiteSpace: "pre-wrap" } }, item.text) : null)),
+    (needs.length || actions.length) ? h("div", { style: { display: "flex", justifyContent: "flex-end" } },
+      h("button", {
+        class: "cr-home-reset",
+        onClick: () => {
+          if (armed){ crHomeUi.resetArm = ""; crHomeResetCare(char).catch(() => {}); }
+          else { crHomeUi.resetArm = char.id; crTouch(); }
+        },
+        style: { appearance: "none", border: "none", background: "transparent", cursor: "pointer", font: "inherit",
+                 fontSize: CR_T_XS, color: armed ? CR_WARN : CR_DIM, padding: "2px 0", textDecoration: armed ? "none" : "underline" }
+      }, armed ? "Tap again: every need full, every wait cleared" : "Reset needs and timers")) : null
+  );
 }
 
 // [CR-HOME] The event sheet's needs part (D-127): how each need moves an hour while this line is on.

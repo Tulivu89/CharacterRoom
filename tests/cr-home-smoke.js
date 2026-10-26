@@ -1,7 +1,7 @@
 // ============================================================================
 // cr-home-smoke.js — Home  [CR-HOME]
 //
-// Pins engine 1.0.19 (D-117, D-118, D-120 to D-128): a Contact's schedule lines carry Home per Scenario (room,
+// Pins engine 1.0.20 (D-117, D-118, D-120 to D-129): a Contact's schedule lines carry Home per Scenario (room,
 // spot, picture), a nothing-on place, the User with the Contact unless dropped in, a speaker told only their own
 // room, nothing changed while Home is off, the Scenario's Locations with layers and atmosphere on the chat clock,
 // Arrange (tap, drag end saves, fresh targets), pictures, routines, the event sheet, the 1.0.13 migration and
@@ -9,7 +9,8 @@
 // clock, effects, set picks, the needs brain, a low need's look, reactions written and sent); the Clock panel's draft
 // and Set the clock with its tally; While you were away (hand-set and real-time gaps, Catch up); Snapshot; the
 // relationship ladder in the UI (D-126); locked places, lines that move needs, scoped actions and the relationship
-// track with its step (D-127).
+// track with its step (D-127); D-129: the needs brain with Home on, Call here, what exactly, Reset, the clock bar
+// with Go to, room tiles and the switch, the Chat tab without This story and Brains last.
 //   CR_ENGINE_FILE=<engine> node cr-home-smoke.js
 // ============================================================================
 const fs = require('fs');
@@ -123,11 +124,13 @@ async function load(env) {
         'CrLocationsTab', 'crLocOpen', 'crRoutineSave', 'crRoutineLoad', 'crRoutineExport', 'crRoutineImport', 'crScheduleOf',
         'crLineHomeOf', 'crHomeIdleOf', 'crPicsOf', 'crSchedPresetsOf', 'CrRoutinesSection',
         'crNeedsCommit', 'crNeedsStarter', 'crNeedsOf', 'crHomeActionsOf', 'crNeedValue', 'crNeedsState', 'crHomeDoAction',
-        'crHomeLog', 'crHomeSetNeedsLine', 'crHomeReact', 'crHomeSendReaction', 'CrNeedsSection', 'crNeedsText', 'crClockNow',
+        'crHomeLog', 'crHomeReact', 'crHomeSendReaction', 'CrNeedsSection', 'crNeedsText', 'crClockNow',
         'CrScheduleTab', 'crSetActive', 'crClockSetMode', 'crClockDraftSet', 'crClockApplyDraft', 'crClockTallyNote', 'crHomeTally',
         'crHomeAwayInit', 'crIllus', 'CrClockPanel', 'CrHomeAway', 'crHomeSnapshot', 'crUiStore', 'crClockDraft',
         'crLineNeedsSet', 'crCareAt', 'crBondStep', 'crBondTakeStep', 'crHomeBadge', 'crHomeActionGate', 'crHomeLocked',
-        'crSchedGated', 'crSetIntimacy', 'crLevelReaches', 'CrNeedsSection', 'crEventNeedsChoice', 'crHomeSetNeed', 'crStatusRead'];
+        'crSchedGated', 'crSetIntimacy', 'crLevelReaches', 'CrNeedsSection', 'crEventNeedsChoice', 'crHomeSetNeed', 'crStatusRead',
+        'crHomeCall', 'crHomeRelease', 'crHomeResetCare', 'crHomeCalls', 'crClockParse', 'crClockGo', 'CrClockBar', 'crHomeActionLine',
+        'crSanitizeHomeLog', 'CrChatSurface', 'crClockSetMode'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -236,7 +239,11 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
 
   // ---- surface and Arrange
   let txt = strings(X.CrHomeSurface()({ mobile: true }));
-  ok('surface: rooms with how many are in each', txt.indexOf('Kitchen  ·  2') >= 0 && txt.indexOf('Garden  ·  1') >= 0 && txt.indexOf('In Kitchen: Kat, you.') >= 0, txt.slice(0, 400));
+  const tiles0 = flat(X.CrHomeSurface()({ mobile: true })).filter((n) => n && n.props && n.props.class && String(n.props.class).indexOf('cr-home-tile') === 0);
+  ok('surface: a tile per room, the one in view lit, saying how many are in each (1.0.20)', tiles0.length === 2 && tiles0[0].props['aria-label'] === 'Kitchen, 2 here'
+    && tiles0[0].props['aria-pressed'] === 'true' && tiles0[1].props['aria-label'] === 'Garden, 1 here' && txt.indexOf('Here: Kat, you.') >= 0, tiles0.map((t) => t.props['aria-label']).concat([txt.slice(0, 400)]));
+  ok('surface: Home on is a switch; the clock rides at the top (1.0.20)', flat(X.CrHomeSurface()({ mobile: true })).some((n) => n && n.props && n.props.role === 'switch' && n.props['aria-checked'] === 'true')
+    && txt.indexOf('Home is on') >= 0 && txt.indexOf('real time') >= 0, txt.slice(0, 300));
   X.crHomeUi().look = 'vGar';
   X.crHomeUi().arrange = true;
   txt = strings(X.CrHomeSurface()({ mobile: true }));
@@ -347,17 +354,26 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
   const today = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(X.crClockNow()()).getDay()];
   wk.schedule[today] = [{ id: 'w', startTime: 0, endTime: 1439, text: 'Special', requiredIntimacy: 'none' }];
   ok('schedule: the day\'s own line outranks the Daily one (D-128)', X.crStatusRead()(wk).live.map((e) => e.id).join() === 'w,d', X.crStatusRead()(wk).live);
-  ok('needs brain: off unless asked for — the card goes as it is', X.crBrainView()(garm()) === garm());
-  await X.crHomeSetNeedsLine()(true);
   let nb = (X.crBrainView()(garm()).brains || []).find((x) => x.name === 'Needs');
-  ok('needs brain: on, a low need joins the speaker\'s brains', nb && nb.content === 'Garm: Hunger 20/100 — running low.', nb);
-  ok('needs brain: the switch keeps Home on beside it', JSON.stringify(await X.story.get('cr.home')) === '{"on":true,"needsLine":true}');
+  ok('needs brain: with Home on, every need where it stands, the low ones flagged (1.0.20)',
+    nb && nb.content === "Garm's needs right now: Hunger 20/100 (low), Energy 100/100, Fun 100/100, Company 100/100.", nb);
+  garm().cr.needs[0].note = 'raids {{user}}\'s plate';
+  nb = (X.crBrainView()(garm()).brains || []).find((x) => x.name === 'Needs');
+  ok('needs brain: a low need carries its note', nb && nb.content.indexOf("Hunger 20/100 (low \u2014 raids Sam's plate)") >= 0, nb);
+  delete garm().cr.needs[0].note;
+  ok('needs brain: the Home switch stores on alone', JSON.stringify(await X.story.get('cr.home')) === '{"on":true}', await X.story.get('cr.home'));
   ok('needs brain: a Scenario carries none', !(X.crBrainView()(port()).brains || []).some((x) => x.name === 'Needs'));
+  await X.crHomeSetOn()(false);
+  ok('needs brain: Home off — the card goes as it is', X.crBrainView()(garm()) === garm());
+  await X.crHomeSetOn()(true);
   X.crHomeUi().arrange = false;
   X.crHomeUi().look = X.crHomePlace()(garm(), rooms(), 's-port').room;
   const careTree = flat(X.CrHomeSurface()({ mobile: true }));
   txt = careTree.filter((x) => typeof x === 'string').join(' | ');
-  ok('care: meters, levels and actions on Home', txt.indexOf('Garm  ·  in ') >= 0 && txt.indexOf('Hunger | 20/100') >= 0 && txt.indexOf('Feed') >= 0 && txt.indexOf('Needs go to the chat') >= 0, txt.slice(0, 900));
+  ok('care: a card with where and what, meters, action tiles with their effects, the what-exactly box and Reset (1.0.20)',
+    txt.indexOf('Garm | in ') >= 0 && txt.indexOf('Hunger | 20/100') >= 0 && txt.indexOf('Feed | Hunger +40') >= 0 && txt.indexOf('Play | Fun +35 · Energy −10') >= 0
+    && txt.indexOf('Reset needs and timers') >= 0 && careTree.some((n) => n && n.props && n.props.class === 'cr-home-say'), txt.slice(0, 1200));
+  ok('care: someone elsewhere can be called to the room in view', txt.indexOf('Call here | to ') >= 0, txt.slice(0, 1200));
   ok('care: a low need puts its emotion on a figure with no picture of its own',
     careTree.some((n) => n && n.props && String(n.props['data-ce-img'] || '').indexOf('c-garm|irritated') === 0));
   await X.crHomeDoAction()(garm(), 'feed');
@@ -431,10 +447,10 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
   X.crHomeUi().look = gNow;
   const lockTree = flat(X.CrHomeSurface()({ mobile: true }));
   txt = lockTree.filter((x) => typeof x === 'string').join(' | ');
-  ok('locks: Home shows the lock, no one inside, and no Drop in', txt.indexOf('is shut to you for now') >= 0 && txt.indexOf('opens at romantic') >= 0 && txt.indexOf('🔒 ') >= 0
-    && txt.indexOf('Drop in') < 0 && !lockTree.some((n) => n && n.props && n.props.class === 'cr-home-figure'), txt.slice(0, 700));
+  ok('locks: Home shows the lock, no one inside, no Go here and no Call here', txt.indexOf('Shut to you for now') >= 0 && txt.indexOf('opens at romantic') >= 0 && txt.indexOf('🔒 ') >= 0
+    && txt.indexOf('Go here') < 0 && txt.indexOf('Call here') < 0 && !lockTree.some((n) => n && n.props && n.props.class === 'cr-home-figure'), txt.slice(0, 700));
   X.crHomeUi().arrange = true;
-  ok('locks: Arrange still opens it', flat(X.CrHomeSurface()({ mobile: true })).filter((x) => typeof x === 'string').join(' | ').indexOf('is shut to you') < 0);
+  ok('locks: Arrange still opens it', flat(X.CrHomeSurface()({ mobile: true })).filter((x) => typeof x === 'string').join(' | ').indexOf('Shut to you') < 0);
   X.crHomeUi().arrange = false;
   X.crHomeUi().look = '';
   delete gVar().lock;
@@ -499,6 +515,58 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
 
   txt = strings(X.CrScheduleTab()({ char: garm(), mobile: true }));
   ok('schedule tab: its lines and the needs editor', txt.indexOf('Digging') >= 0 && txt.indexOf('Needs and actions') >= 0 && txt.indexOf('Drops an hour') >= 0, txt.slice(0, 600));
+
+  // ---- 1.0.20: Call, what exactly, reset, the clock bar, the Chat tab
+  await X.crHomeCall()(kat(), port(), 'vGar', 'by her name');
+  let pc = X.crHomePlace()(kat(), rooms(), 's-port');
+  ok('call: Kat comes to the Garden, called', pc.room === 'vGar' && pc.why === 'called', pc);
+  const callItem = X.crHomeLog()[X.crHomeLog().length - 1];
+  ok('call: logged for a reaction, with what the User wrote', callItem.kind === 'call' && callItem.detail === 'by her name' && callItem.action === 'Called to Garden', callItem);
+  ok('call: the User is with her there', X.crHomeUserRoom()(rooms(), 's-port') === 'vGar');
+  ok('call: kept in the story', (await X.story.get('cr.homeCall'))['c-kat'].room === 'vGar');
+  X.crHomeUi().look = 'vGar';
+  txt = strings(X.CrHomeSurface()({ mobile: true }));
+  ok('call: her card offers Let them go', txt.indexOf('Let them go') >= 0 && txt.indexOf('came when called') >= 0, txt.slice(0, 1400));
+  X.crHomeUi().look = '';
+  await X.crHomeReact()(callItem.id);
+  ok('call: the reaction is told she came, and what exactly', X.crHomeUi().__msgs[2].content === '[ Home: Sam calls Kat to Garden, and Kat comes. Specifically: by her name. ]', X.crHomeUi().__msgs[2].content);
+  ok('call: a call item keeps its line and detail through the sanitizer', X.crSanitizeHomeLog()({ items: [callItem] })[0].lines[0] === callItem.lines[0] && X.crSanitizeHomeLog()({ items: [callItem] })[0].detail === 'by her name');
+  await X.crHomeRelease()(kat());
+  ok('call: Let them go sends her back to her day', X.crHomePlace()(kat(), rooms(), 's-port').why === 'idle' && !X.crHomeCalls()['c-kat']);
+  X.crHomeCalls()['c-kat'] = { scenarioId: 's-port', room: 'vGar', line: 'not-on-now', at: X.crClockNow()() };
+  ok('call: ends when the line that was on when called ends', X.crHomePlace()(kat(), rooms(), 's-port').why === 'idle');
+  await X.crHomeCall()(kat(), port(), 'vKit');
+  ok('call: a fresh call holds while her line holds', X.crHomePlace()(kat(), rooms(), 's-port').why === 'called');
+  X.crClockDraftSet()(X.crClockNow()() + 13 * 3600000);
+  await X.crClockApplyDraft()();
+  ok('call: wears off after twelve hours at most', X.crHomePlace()(kat(), rooms(), 's-port').why === 'idle');
+  await X.crHomeDoAction()(garm(), 'feed', 'a bowl of noodles');
+  const fedItem = X.crHomeLog()[X.crHomeLog().length - 1];
+  ok('detail: an action carries what exactly into its line', fedItem.detail === 'a bowl of noodles' && X.crHomeActionLine()(fedItem, garm()) === 'Sam brings Garm something to eat. Specifically: a bowl of noodles.', X.crHomeActionLine()(fedItem, garm()));
+  const giftA = () => X.crHomeActionsOf()(garm()).find((a) => a.id === 'gift');
+  await X.crHomeDoAction()(garm(), 'gift');
+  ok('reset: the gift has its wait', /^again in/.test(X.crHomeActionGate()(garm(), giftA())), X.crHomeActionGate()(garm(), giftA()));
+  await X.crHomeResetCare()(garm());
+  ok('reset: every need full and every wait cleared', X.crHomeActionGate()(garm(), giftA()) === '' && Math.round(X.crNeedValue()('c-garm', hunger())) === 100
+    && !X.crHomeLog().some((x) => x.whoId === 'c-garm' && x.act), X.crHomeActionGate()(garm(), giftA()));
+  const B = Date.UTC(2026, 9, 26, 18, 0);
+  const P = (t) => X.crClockParse()(t, B);
+  ok('clock: Go to reads relative moves', P('+3h') === B + 3 * 3600000 && P('-30m') === B - 1800000 && P('+2d') === B + 2 * 86400000);
+  ok('clock: a time is the next one', P('14:30') === Date.UTC(2026, 9, 27, 14, 30) && P('19:15') === Date.UTC(2026, 9, 26, 19, 15)
+    && P('2pm') === Date.UTC(2026, 9, 27, 14, 0) && P('9:05 am') === Date.UTC(2026, 9, 27, 9, 5), [P('14:30'), P('2pm')]);
+  ok('clock: a weekday and a time', P('fri 21:00') === Date.UTC(2026, 9, 30, 21, 0) && P('Monday 9pm') === Date.UTC(2026, 9, 26, 21, 0) && P('mon 17:00') === Date.UTC(2026, 10, 2, 17, 0));
+  ok('clock: times of day by name', P('morning') === Date.UTC(2026, 9, 27, 8, 0) && P('night') === Date.UTC(2026, 9, 26, 22, 0));
+  ok('clock: what it cannot read', isNaN(P('soon')) && isNaN(P('25:00')) && isNaN(P('13pm')) && isNaN(P('7')));
+  const before = X.crClockNow()();
+  X.crClockGo()('+90m');
+  ok('clock: Go to builds a draft, the clock stays', X.crClockDraft() === before + 90 * 60000 && X.crClockNow()() === before);
+  txt = strings(X.CrClockBar()({ mobile: true, home: true }));
+  ok('clock bar: steppers, times of day and the draft to set', txt.indexOf('15m') >= 0 && txt.indexOf('1d') >= 0 && txt.indexOf('Morning') >= 0 && txt.indexOf('Set the clock') >= 0 && txt.indexOf('+1h 30m') >= 0, txt);
+  X.crClockDraftSet()(0);
+  txt = strings(X.CrClockPanel()({ mobile: true }));
+  ok('clock panel: the same bar, settings folded away', txt.indexOf('Real | Story') >= 0 && txt.indexOf('Clock settings') >= 0 && txt.indexOf('Advance per reply') < 0, txt);
+  txt = strings(X.CrChatSurface()({ mobile: true, tab: 'chat' }));
+  ok('chat tab: no This story header; Brains is the last tab', txt.indexOf('This story') < 0 && /^Chat \| Home( ●)? \| Stage \| Group \| Brains \|/.test(txt), txt.slice(0, 200));
 
   // ---- sanitizers
   const clean = X.crSanitizeContactExtra()({ lineHome: { e1: { s1: { room: 'vKit', x: 5, y: -1, scale: 0, pic: 'bad id' }, s2: { room: 'no good' } } }, homeIdle: { s1: { room: 'vGar' } },
