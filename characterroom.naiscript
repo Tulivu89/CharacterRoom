@@ -3,8 +3,8 @@ compatibilityVersion: naiscript-1.0
 id: 6b1e3c52-4a7d-4c0e-9f3a-2d8b5e7a1c90
 name: CharacterRoom
 createdAt: 1789149384042
-updatedAt: 1793010000000
-version: 1.0.18
+updatedAt: 1793020000000
+version: 1.0.19
 author: AmbiProp, fork of AnotherRoom by Triplis
 description: Character chat for Xialong. A fork of AnotherRoom by Triplis.
 memoryLimit: 128
@@ -16,7 +16,7 @@ config:
     description: context menu (Enabled) OR toolbar button (Disabled)
 ---*/
 /*
-CharacterRoom 1.0.18. Character chat for NovelAI's xialong-v1.
+CharacterRoom 1.0.19. Character chat for NovelAI's xialong-v1.
 Forked from AnotherRoom 1.1.5 by Triplis, with permission.
 AnotherRoom credits: LtLi0n (TypeScript help), Moonbow (UI design), Moonbow and FurbyMask
 (early testing), SomethingRoom script (AeR-like scaffolding).
@@ -73,7 +73,8 @@ SECTIONS (search "SECTION <NAME>")
               (crNeedsBrain). D-127: places locked below a relationship (variant.lock, crHomeLocked); schedule lines
               that move needs while on (cr.lineNeeds); a relationship track (cr.bond) that offers a step up or down
               (crBondStep, the Home tab's dot); actions limited by place, level and a wait, or aimed at the track;
-              levels read by replaying the chat clock (crCareAt). While you were away (CrHomeAway): a gap in the clock — Clock panel draft and Set the
+              levels read by replaying the chat clock (crCareAt). D-128: a need's note (how this character shows
+              it) rides the Needs line; a weekday line outranks a Daily one (crStatusRead order). While you were away (CrHomeAway): a gap in the clock — Clock panel draft and Set the
               clock (crClockApplyDraft), or real time with the story closed (crHomeAwayInit, onScriptsLoaded) — is
               tallied (crHomeTally) and logged for Catch up; Snapshot hands the room to Illustrate. Place logic, needs
               state, the tally and the cr.home switch sit in CR-SETS
@@ -5051,7 +5052,7 @@ interface CrScenarioExtra {
 }
 
 // [CR-HOME] D-124: a need drains by decay per chat-clock hour from max; at or under low it counts as low.
-interface CrNeed { id: string; name: string; max: number; decay: number; low: number; lowEmotion?: string; }
+interface CrNeed { id: string; name: string; max: number; decay: number; low: number; lowEmotion?: string; note?: string; }
 interface CrHomeAction { id: string; name: string; effects: Record<string, number>; say?: string; set?: { setId: string; variantId: string };
                          rooms?: string[]; level?: string; cooldown?: number; bond?: number; }
 // [CR-HOME] D-127: the relationship track — rises while every need is at upAt% or more, falls while needs are low.
@@ -5799,6 +5800,8 @@ function crSanitizeNeeds(v: any) : CrNeed[] | undefined
     if (typeof r.lowEmotion === "string" && (EMOTION_LIST as readonly string[]).indexOf(r.lowEmotion) >= 0){
       n.lowEmotion = r.lowEmotion;
     }
+    const note = crSanitizeText(r.note, 200);
+    if (note){ n.note = note; }
     out.push(n);
   }
   return out.length ? out : undefined;
@@ -5880,8 +5883,9 @@ function crNeedsText(char: Character) : string
   if (!low.length){
     return "";
   }
-  return (char.name || "They") + ": " + low.map((n) => (n.name || "Need") + " " + Math.round(crNeedValue(char.id, n)) + "/" + n.max).join(", ")
-    + " — running low.";
+  // D-128: a need's note is how this character shows it — the generic need, the character's own flavour.
+  return (char.name || "They") + ": " + low.map((n) => (n.name || "Need") + " " + Math.round(crNeedValue(char.id, n)) + "/" + n.max
+    + (n.note ? " (" + crHomeFill(n.note, char) + ")" : "")).join(", ") + " — running low.";
 }
 
 // D-124: with Home on and Needs in the chat on, a speaking Contact with a low need carries one more brain.
@@ -5994,7 +5998,7 @@ function crCareAt(char: Character, ms: number) : { needs: Record<string, number>
       continue;
     }
     const m = crMinutesOfDay(a);
-    const live = (sched.Daily || []).concat(sched[crWeekdayOf(a) as Day] || [])
+    const live = (sched[crWeekdayOf(a) as Day] || []).concat(sched.Daily || [])
       .filter((e) => crSchedLive(e, m) && !(paired && crSchedGated(e)));
     needs.forEach((n) => {
       const st = rows[n.id];
@@ -12396,8 +12400,9 @@ function crStatusRead(char: Character) : CrStatusRead
   const paired = !!(chatSettings.char && chatSettings.char.id === char.id);
   if (sched){
     const lists: ScheduleEvent[][] = [];
-    if (sched["Daily"]){ lists.push(sched["Daily"]); }
+    // The day's own lines first: a weekday special outranks the Daily routine for Home and the sets (D-128).
     if (sched[today]){ lists.push(sched[today]); }
+    if (sched["Daily"]){ lists.push(sched["Daily"]); }
     for (const list of lists){
       for (const e of list){
         if (!crSchedLive(e, minutes)){
@@ -24205,7 +24210,9 @@ function crNeedsStarter() : { needs: CrNeed[]; actions: CrHomeAction[]; bond: Cr
       { id: "rest", name: "Let them rest", effects: { energy: 50, fun: -5 }, say: "{{user}} lets {{char}} rest for a while." },
       { id: "play", name: "Play", effects: { fun: 35, energy: -10 }, say: "{{user}} plays with {{char}}." },
       { id: "talk", name: "Talk", effects: { company: 30 }, say: "{{user}} sits down to talk with {{char}}." },
-      { id: "gift", name: "Give a gift", effects: { company: 10 }, bond: 15, cooldown: 24, say: "{{user}} gives {{char}} a gift." }
+      { id: "gift", name: "Give a gift", effects: { company: 10 }, bond: 15, cooldown: 24, say: "{{user}} gives {{char}} a gift." },
+      { id: "outing", name: "Go out together", effects: { fun: 20, company: 25, energy: -10, hunger: -10 }, bond: 10, cooldown: 48, level: "acquaintance",
+        say: "{{user}} takes {{char}} out for the evening." }
     ],
     bond: { name: "Bond", max: 100, up: 4, down: 4, upAt: 60, downWhen: "all" }
   };
@@ -24239,6 +24246,8 @@ function CrNeedsSection(props: { char: Character }) : any
       h(CrNumField, { id: fid(n.id, "max"), label: "Full at", value: n.max, onSet: (v: number) => { needs[i].max = v; commit(); } }),
       h(CrNumField, { id: fid(n.id, "decay"), label: "Drops an hour", value: n.decay, onSet: (v: number) => { needs[i].decay = v; commit(); } }),
       h(CrNumField, { id: fid(n.id, "low"), label: "Low at", value: n.low, onSet: (v: number) => { needs[i].low = v; commit(); } })),
+    h(CrField, { label: "How " + (char.name || "they") + " shows it", hint: "Optional. A few words the chat is told when this is low — what it looks like on this character. {{char}} and {{user}} work." },
+      h(CrTextInput, { value: n.note || "", placeholder: "gets short with everyone and eats off other people's plates", onSet: (v: string) => { needs[i].note = v.slice(0, 200) || undefined; commit(); } })),
     h(CrField, { label: "Looks, when low", hint: "An emotion slot their Home figure shows while this is low and no picture is set: " + EMOTION_LIST.join(", ") + "." },
       h(CrTextInput, { value: n.lowEmotion || "", placeholder: "tired", onSet: (v: string) => { needs[i].lowEmotion = v.trim().toLowerCase() || undefined; commit(); } })),
     h("div", { style: { display: "flex", gap: CR_S_2, flexWrap: "wrap" } },
@@ -24256,7 +24265,7 @@ function CrNeedsSection(props: { char: Character }) : any
   },
     h(CrField, { label: "Action" },
       h(CrTextInput, { value: a.name, placeholder: "Feed", onSet: (v: string) => { actions[i].name = v.slice(0, 40); commit(); } })),
-    h(CrField, { label: "What happens", hint: "The line a reaction answers. {{char}} and {{user}} become their names." },
+    h(CrField, { label: "What happens", hint: "Optional. This character's version of the action — the line a reaction answers. {{char}} and {{user}} become their names." },
       h(CrTextInput, { value: a.say || "", placeholder: "{{user}} brings {{char}} something to eat.", onSet: (v: string) => { actions[i].say = v.slice(0, 300) || undefined; commit(); } })),
     needs.length ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: CR_S_2 } },
       needs.map((n) => h(CrNumField, {

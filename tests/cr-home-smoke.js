@@ -1,7 +1,7 @@
 // ============================================================================
 // cr-home-smoke.js — Home  [CR-HOME]
 //
-// Pins engine 1.0.18 (D-117, D-118, D-120 to D-127): a Contact's schedule lines carry Home per Scenario (room,
+// Pins engine 1.0.19 (D-117, D-118, D-120 to D-128): a Contact's schedule lines carry Home per Scenario (room,
 // spot, picture), a nothing-on place, the User with the Contact unless dropped in, a speaker told only their own
 // room, nothing changed while Home is off, the Scenario's Locations with layers and atmosphere on the chat clock,
 // Arrange (tap, drag end saves, fresh targets), pictures, routines, the event sheet, the 1.0.13 migration and
@@ -127,7 +127,7 @@ async function load(env) {
         'CrScheduleTab', 'crSetActive', 'crClockSetMode', 'crClockDraftSet', 'crClockApplyDraft', 'crClockTallyNote', 'crHomeTally',
         'crHomeAwayInit', 'crIllus', 'CrClockPanel', 'CrHomeAway', 'crHomeSnapshot', 'crUiStore', 'crClockDraft',
         'crLineNeedsSet', 'crCareAt', 'crBondStep', 'crBondTakeStep', 'crHomeBadge', 'crHomeActionGate', 'crHomeLocked',
-        'crSchedGated', 'crSetIntimacy', 'crLevelReaches', 'CrNeedsSection', 'crEventNeedsChoice', 'crHomeSetNeed'];
+        'crSchedGated', 'crSetIntimacy', 'crLevelReaches', 'CrNeedsSection', 'crEventNeedsChoice', 'crHomeSetNeed', 'crStatusRead'];
     const exp = names.map((n) => `${JSON.stringify(n)}: () => (typeof ${n} !== 'undefined' ? ${n} : undefined)`).join(',');
     const extra = (env.extra || []).map((t) => '{\n' + t + '\n}\n').join('');
     const exported = await vm.runInContext(`(async () => {\n${js}\n;${extra}return {${exp}};\n})()`, ctx, { filename: ENGINE });
@@ -331,13 +331,22 @@ const FAKEGEN = 'crHomeUi.__fake = () => { crGroupAssemble = async () => [{ role
   kitN.actions[0].set = { setId: 'sMood', variantId: 'vRain' };
   await X.crNeedsCommit()(garm(), kitN.needs, kitN.actions, kitN.bond);
   const gStored = (await L.storage.get('characterListKey')).find((c) => c.id === 'c-garm').cr;
-  ok('needs: stored on the card, the gift waits a day and feeds the track', gStored.needs.length === 4 && gStored.homeActions.length === 5 && gStored.homeActions[0].set.variantId === 'vRain'
+  ok('needs: stored on the card, the gift waits a day and feeds the track', gStored.needs.length === 4 && gStored.homeActions.length === 6 && gStored.homeActions[5].level === 'acquaintance' && gStored.homeActions[0].set.variantId === 'vRain'
     && gStored.homeActions[4].cooldown === 24 && gStored.homeActions[4].bond === 15 && gStored.bond.upAt === 60);
   const hunger = () => X.crNeedsOf()(garm())[0];
   ok('needs: full until the story first sets them', X.crNeedValue()('c-garm', hunger()) === 100);
   X.crNeedsState()['c-garm'] = { hunger: { v: 50, at: X.crClockNow()() - 5 * 3600000 } };
   ok('needs: drain by the hour on the chat clock', Math.round(X.crNeedValue()('c-garm', hunger())) === 20);
   ok('needs: the low ones as one line', X.crNeedsText()(garm()) === 'Garm: Hunger 20/100 — running low.', X.crNeedsText()(garm()));
+  garm().cr.needs[0].note = 'raids {{user}}\'s plate';
+  ok('needs: a need\'s note is how this character shows it (D-128)', X.crNeedsText()(garm()) === "Garm: Hunger 20/100 (raids Sam's plate) — running low.", X.crNeedsText()(garm()));
+  ok('data: a need keeps its note', X.crSanitizeContactExtra()({ needs: [{ id: 'h', name: 'H', note: 'snaps' }] }).needs[0].note === 'snaps');
+  delete garm().cr.needs[0].note;
+  const wk = { cardType: 'contact', id: 'c-wk', name: 'W', schedule: { Daily: [{ id: 'd', startTime: 0, endTime: 1439, text: 'Routine', requiredIntimacy: 'none' }],
+    Monday: [], Tuesday: [], Wednesday: [], Thursday: [], Friday: [], Saturday: [], Sunday: [] } };
+  const today = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(X.crClockNow()()).getDay()];
+  wk.schedule[today] = [{ id: 'w', startTime: 0, endTime: 1439, text: 'Special', requiredIntimacy: 'none' }];
+  ok('schedule: the day\'s own line outranks the Daily one (D-128)', X.crStatusRead()(wk).live.map((e) => e.id).join() === 'w,d', X.crStatusRead()(wk).live);
   ok('needs brain: off unless asked for — the card goes as it is', X.crBrainView()(garm()) === garm());
   await X.crHomeSetNeedsLine()(true);
   let nb = (X.crBrainView()(garm()).brains || []).find((x) => x.name === 'Needs');
